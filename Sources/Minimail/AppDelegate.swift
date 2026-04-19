@@ -5,10 +5,13 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
-    private let appState = AppState()
+    let appState = AppState()
     private var eventMonitor: Any?
+    private var pollTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MinimailNotifier.shared.popoverOpener = self
+        MinimailNotifier.shared.register()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(
@@ -43,12 +46,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { @MainActor in
             await appState.bootstrap()
+            // Seed "seen" set so we don't backfill notifications for every
+            // existing received message on first launch.
+            let receivedIDs = appState.inbox.messages
+                .filter { $0.direction == "received" }
+                .map(\.id)
+            MinimailNotifier.shared.seed(receivedIDs)
             refreshStatusTitle()
+            startPollingForNewMail()
         }
 
         // Re-sync the menu bar title whenever the unread count changes.
         // withObservationTracking is one-shot; re-register inside onChange.
         observeUnread()
+    }
+
+    /// Background mail check independent of the popover. Runs every 60s while
+    /// the app is alive. After each refresh, diff new received messages against
+    /// the seen set and fire notifications.
+    private func startPollingForNewMail() {
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.appState.refreshInbox(pull: true)
+                let received = self.appState.inbox.messages.filter { $0.direction == "received" }
+                MinimailNotifier.shared.notifyNewMessages(received)
+                self.refreshStatusTitle()
+            }
+        }
+    }
+
+    /// Invoked by MinimailNotifier when a notification banner is clicked.
+    func openFromNotification(messageID: Int64?) {
+        NSApp.activate(ignoringOtherApps: true)
+        if !popover.isShown { showPopover() }
+        guard let id = messageID else { return }
+        if let msg = appState.inbox.messages.first(where: { $0.id == id }) {
+            appState.open(message: msg)
+        } else {
+            appState.router.currentView = .reader(id)
+        }
     }
 
     private func observeUnread() {

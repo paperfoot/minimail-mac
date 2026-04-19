@@ -95,10 +95,27 @@ final class ComposeState {
     /// Non-nil = dialog asking whether to permanently delete the linked message.
     var pendingDeleteConfirm: Int64?
 
+    /// The backing draft row we're editing — created lazily on first autosave,
+    /// or populated when the user taps a row in the Drafts folder. On send
+    /// or explicit discard we delete it.
+    var editingDraftID: String?
+    var lastAutosaveAt: Date?
+    var autosaveTask: Task<Void, Never>?
+
     func clear() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
         to = ""; cc = ""; bcc = ""; subject = ""; body = ""
         attachments = []
         replyToID = nil; forwardingID = nil; replyAll = false; error = nil
+        editingDraftID = nil; lastAutosaveAt = nil
+    }
+
+    /// Anything worth persisting?
+    var hasContent: Bool {
+        !to.trimmingCharacters(in: .whitespaces).isEmpty
+        || !subject.trimmingCharacters(in: .whitespaces).isEmpty
+        || !body.trimmingCharacters(in: .whitespaces).isEmpty
     }
 }
 
@@ -112,6 +129,7 @@ final class RouterState {
         case accountSwitcher
         case settings
         case needsInstall
+        case onboarding
     }
     var currentView: View = .inbox
 }
@@ -147,6 +165,10 @@ final class AppState {
         }
         session.cliPath = await cli.locate()
         await refreshAccounts()
+        if session.accounts.isEmpty {
+            router.currentView = .onboarding
+            return
+        }
         await refreshInbox(pull: false)
     }
 
@@ -310,12 +332,73 @@ final class AppState {
 
     func edit(draft: Draft) {
         compose.clear()
+        compose.editingDraftID = draft.id
         compose.to = (draft.to ?? []).joined(separator: ", ")
         compose.cc = (draft.cc ?? []).joined(separator: ", ")
         compose.bcc = (draft.bcc ?? []).joined(separator: ", ")
         compose.subject = draft.subject ?? ""
         compose.body = draft.text_body ?? ""
+        compose.replyToID = draft.reply_to_message_id
         router.currentView = .compose(nil)
+    }
+
+    // ── Draft autosave ───────────────────────────────────────────────────
+
+    /// Debounced: call every time a compose field changes. Waits 1.5s of
+    /// inactivity, then creates/updates the backing draft row.
+    func scheduleAutosave() {
+        compose.autosaveTask?.cancel()
+        compose.autosaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            if Task.isCancelled { return }
+            await self?.performAutosave()
+        }
+    }
+
+    private func performAutosave() async {
+        guard compose.hasContent else { return }
+        let toList = splitAddresses(compose.to)
+        let ccList = splitAddresses(compose.cc)
+        let bccList = splitAddresses(compose.bcc)
+        let subject = compose.subject
+        let body = compose.body.isEmpty ? nil : compose.body
+
+        do {
+            if let id = compose.editingDraftID {
+                try await cli.editDraft(
+                    id: id, to: toList, cc: ccList, bcc: bccList,
+                    subject: subject, text: body
+                )
+            } else {
+                let draft = try await cli.createDraft(
+                    account: session.currentAccount?.email,
+                    to: toList, cc: ccList, bcc: bccList,
+                    subject: subject, text: body,
+                    replyToMessageID: compose.replyToID
+                )
+                compose.editingDraftID = draft.id
+            }
+            compose.lastAutosaveAt = Date()
+        } catch {
+            // Autosave failures are silent — we'll try again on the next edit.
+        }
+    }
+
+    /// Explicit "Discard" — deletes the backing draft and clears compose state.
+    func discardDraft() async {
+        if let id = compose.editingDraftID {
+            try? await cli.deleteDraft(id: id)
+        }
+        compose.clear()
+        router.currentView = .inbox
+        await refreshDrafts()
+    }
+
+    /// Called on popover close / app quit — flush any pending debounce.
+    func flushAutosave() async {
+        compose.autosaveTask?.cancel()
+        compose.autosaveTask = nil
+        await performAutosave()
     }
 
     // ── Compose ──────────────────────────────────────────────────────────
@@ -365,9 +448,13 @@ final class AppState {
                 attachments: compose.attachments,
                 replyToMessageID: compose.replyToID
             )
+            if let draftID = compose.editingDraftID {
+                try? await cli.deleteDraft(id: draftID)
+            }
             compose.clear()
             router.currentView = .inbox
             await refreshInbox(pull: false)
+            if inbox.currentFolder == .drafts { await refreshDrafts() }
             return true
         } catch {
             compose.error = error.localizedDescription

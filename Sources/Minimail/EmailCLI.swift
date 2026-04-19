@@ -202,6 +202,49 @@ actor EmailCLI {
         return try await runJSON(args: args, as: [Draft].self)
     }
 
+    func createDraft(
+        account: String?,
+        to: [String],
+        cc: [String],
+        bcc: [String],
+        subject: String,
+        text: String?,
+        html: String? = nil,
+        replyToMessageID: Int64? = nil
+    ) async throws -> Draft {
+        var args = ["draft", "create", "--json"]
+        if let account { args += ["--account", account] }
+        for t in to { args += ["--to", t] }
+        for c in cc { args += ["--cc", c] }
+        for b in bcc { args += ["--bcc", b] }
+        args += ["--subject", subject]
+        if let text { args += ["--text", text] }
+        if let html { args += ["--html", html] }
+        if let replyToMessageID { args += ["--reply-to-msg", String(replyToMessageID)] }
+        return try await runJSON(args: args, as: Draft.self)
+    }
+
+    func editDraft(
+        id: String,
+        to: [String]?,
+        cc: [String]?,
+        bcc: [String]?,
+        subject: String?,
+        text: String?
+    ) async throws {
+        var args = ["draft", "edit", id, "--json"]
+        if let subject { args += ["--subject", subject] }
+        if let text { args += ["--text", text] }
+        if let to { for t in to { args += ["--to", t] } }
+        if let cc { for c in cc { args += ["--cc", c] } }
+        if let bcc { for b in bcc { args += ["--bcc", b] } }
+        _ = try await runRaw(args: args)
+    }
+
+    func deleteDraft(id: String) async throws {
+        _ = try await runRaw(args: ["draft", "delete", id, "--json"])
+    }
+
     func signature(for account: String) async throws -> String? {
         let raw = try await runRaw(args: ["signature", "show", account, "--json"])
         let env = try JSONDecoder().decode(Envelope<SignatureResponse>.self, from: raw)
