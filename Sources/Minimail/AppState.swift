@@ -37,6 +37,7 @@ final class AppState {
     var selectedMessage: Message?
     var totalUnread: Int = 0
     var searchQuery: String = ""
+    var focusedRowIndex: Int = -1
 
     // ── UX state ──────────────────────────────────────────────────────────
     var syncState: SyncState = .idle
