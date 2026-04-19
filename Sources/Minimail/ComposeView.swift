@@ -24,6 +24,11 @@ struct ComposeView: View {
             textFieldRow(label: "Subject", binding: $bound.subject, field: .subject)
             Divider().opacity(0.1)
 
+            if !state.compose.attachments.isEmpty {
+                attachmentsRow
+                Divider().opacity(0.1)
+            }
+
             TextEditor(text: $bound.body)
                 .font(.system(size: 13))
                 .padding(10)
@@ -57,9 +62,28 @@ struct ComposeView: View {
                 .font(.system(size: 13, weight: .semibold))
 
             Spacer()
+
+            Button {
+                pickAttachments()
+            } label: {
+                Image(systemName: "paperclip")
+            }
+            .buttonStyle(IconButtonStyle())
+            .help("Attach files")
+            .keyboardShortcut("k", modifiers: [.command, .shift])
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    private func pickAttachments() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK {
+            state.compose.attachments.append(contentsOf: panel.urls)
+        }
     }
 
     private var title: String {
@@ -120,6 +144,25 @@ struct ComposeView: View {
                 .padding(.top, 4)
             EmailTokenField(text: binding, placeholder: "")
                 .frame(minHeight: 24)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    private var attachmentsRow: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("Files")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+                .frame(width: 52, alignment: .leading)
+                .padding(.top, 4)
+            FlowLayout(spacing: 6) {
+                ForEach(state.compose.attachments, id: \.self) { url in
+                    ComposeAttachmentChip(url: url) {
+                        state.compose.attachments.removeAll { $0 == url }
+                    }
+                }
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)

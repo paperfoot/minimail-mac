@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -27,6 +28,7 @@ final class InboxState {
     }
 
     var messages: [Message] = []
+    var drafts: [Draft] = []
     var currentFolder: Folder = .inbox
     var searchQuery: String = ""
     var focusedRowIndex: Int = -1
@@ -43,7 +45,7 @@ final class InboxState {
         case .sent:
             base = messages.filter { $0.direction == "sent" }
         case .drafts:
-            base = [] // wired in v0.2 via draft list
+            base = []
         case .archived:
             base = messages.filter { $0.isArchived }
         }
@@ -54,6 +56,15 @@ final class InboxState {
             msg.from_addr.lowercased().contains(q)
         }
     }
+
+    func visibleDrafts() -> [Draft] {
+        let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return drafts }
+        return drafts.filter { d in
+            (d.subject ?? "").lowercased().contains(q) ||
+            (d.to ?? []).joined(separator: " ").lowercased().contains(q)
+        }
+    }
 }
 
 @MainActor
@@ -62,6 +73,7 @@ final class ReaderState {
     var loaded: Message?
     var error: String?
     var isLoading: Bool = false
+    var attachments: [Attachment] = []
     /// Task owning the currently-running fetch so we can cancel on navigation.
     var inflight: Task<Void, Never>?
 }
@@ -74,14 +86,18 @@ final class ComposeState {
     var bcc: String = ""
     var subject: String = ""
     var body: String = ""
+    var attachments: [URL] = []
     var replyToID: Int64?
     var forwardingID: Int64?
     var replyAll: Bool = false
     var isSending: Bool = false
     var error: String?
+    /// Non-nil = dialog asking whether to permanently delete the linked message.
+    var pendingDeleteConfirm: Int64?
 
     func clear() {
         to = ""; cc = ""; bcc = ""; subject = ""; body = ""
+        attachments = []
         replyToID = nil; forwardingID = nil; replyAll = false; error = nil
     }
 }
@@ -192,6 +208,7 @@ final class AppState {
     private func loadFullMessage(id: Int64) {
         reader.inflight?.cancel()
         reader.isLoading = true
+        reader.attachments = []
         let task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -207,6 +224,12 @@ final class AppState {
             }
             if !Task.isCancelled {
                 self.reader.isLoading = false
+            }
+            // Attachments: best-effort, non-blocking for the body render.
+            if !Task.isCancelled,
+               let list = try? await self.cli.listAttachments(messageID: id),
+               !Task.isCancelled {
+                self.reader.attachments = list
             }
         }
         reader.inflight = task
@@ -242,6 +265,57 @@ final class AppState {
         } catch {
             inbox.error = error.localizedDescription
         }
+    }
+
+    func markUnread(message: Message) async {
+        do {
+            try await cli.markUnread(ids: [message.id])
+            await refreshInbox(pull: false)
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    func delete(message: Message) async {
+        do {
+            try await cli.delete(ids: [message.id])
+            router.currentView = .inbox
+            reader.loaded = nil
+            await refreshInbox(pull: false)
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    // ── Attachments ───────────────────────────────────────────────────────
+
+    func downloadAttachment(_ attachment: Attachment, messageID: Int64, to destination: URL) async {
+        do {
+            try await cli.downloadAttachment(messageID: messageID, attachmentID: attachment.id, to: destination)
+            NSWorkspace.shared.activateFileViewerSelecting([destination])
+        } catch {
+            inbox.error = "Attachment download failed: \(error.localizedDescription)"
+        }
+    }
+
+    // ── Drafts ───────────────────────────────────────────────────────────
+
+    func refreshDrafts() async {
+        do {
+            inbox.drafts = try await cli.listDrafts(account: session.currentAccount?.email)
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    func edit(draft: Draft) {
+        compose.clear()
+        compose.to = (draft.to ?? []).joined(separator: ", ")
+        compose.cc = (draft.cc ?? []).joined(separator: ", ")
+        compose.bcc = (draft.bcc ?? []).joined(separator: ", ")
+        compose.subject = draft.subject ?? ""
+        compose.body = draft.text_body ?? ""
+        router.currentView = .compose(nil)
     }
 
     // ── Compose ──────────────────────────────────────────────────────────
@@ -288,6 +362,7 @@ final class AppState {
                 subject: compose.subject,
                 text: compose.body.isEmpty ? nil : compose.body,
                 html: nil,
+                attachments: compose.attachments,
                 replyToMessageID: compose.replyToID
             )
             compose.clear()

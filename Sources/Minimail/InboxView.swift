@@ -77,11 +77,14 @@ struct InboxView: View {
             ForEach(InboxState.Folder.allCases, id: \.self) { folder in
                 FolderTab(
                     title: folder.rawValue,
-                    count: unreadCount(for: folder, inbox: inbox),
+                    count: badge(for: folder, inbox: inbox),
                     selected: inbox.currentFolder == folder
                 ) {
                     inbox.currentFolder = folder
                     inbox.focusedRowIndex = -1
+                    if folder == .drafts {
+                        Task { await state.refreshDrafts() }
+                    }
                 }
             }
             Spacer()
@@ -90,10 +93,17 @@ struct InboxView: View {
         .padding(.vertical, 6)
     }
 
-    private func unreadCount(for folder: InboxState.Folder, inbox: InboxState) -> Int? {
-        guard folder == .inbox else { return nil }
-        let n = inbox.messages.filter { $0.direction == "received" && !$0.isArchived && $0.isUnread }.count
-        return n > 0 ? n : nil
+    private func badge(for folder: InboxState.Folder, inbox: InboxState) -> Int? {
+        switch folder {
+        case .inbox:
+            let n = inbox.messages.filter { $0.direction == "received" && !$0.isArchived && $0.isUnread }.count
+            return n > 0 ? n : nil
+        case .drafts:
+            let n = inbox.drafts.count
+            return n > 0 ? n : nil
+        default:
+            return nil
+        }
     }
 
     private func searchRow(bound: Binding<String>) -> some View {
@@ -132,7 +142,34 @@ struct InboxView: View {
         .background(Color.orange.opacity(0.12))
     }
 
+    @ViewBuilder
     private var messageList: some View {
+        if state.inbox.currentFolder == .drafts {
+            draftsList
+        } else {
+            regularList
+        }
+    }
+
+    private var draftsList: some View {
+        let visible = state.inbox.visibleDrafts()
+        return ScrollView {
+            LazyVStack(spacing: 0) {
+                if visible.isEmpty {
+                    emptyState
+                } else {
+                    ForEach(visible) { draft in
+                        DraftRow(draft: draft)
+                            .contentShape(Rectangle())
+                            .onTapGesture { state.edit(draft: draft) }
+                        Divider().opacity(0.15)
+                    }
+                }
+            }
+        }
+    }
+
+    private var regularList: some View {
         let visible = state.inbox.visible()
         return ScrollViewReader { proxy in
             ScrollView {

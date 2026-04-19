@@ -123,6 +123,7 @@ actor EmailCLI {
         subject: String,
         text: String?,
         html: String?,
+        attachments: [URL] = [],
         replyToMessageID: Int64? = nil
     ) async throws {
         var args = ["send", "--json"]
@@ -133,6 +134,7 @@ actor EmailCLI {
         args += ["--subject", subject]
         if let text { args += ["--text", text] }
         if let html { args += ["--html", html] }
+        for url in attachments { args += ["--attach", url.path] }
         if let replyToMessageID { args += ["--reply-to-msg", String(replyToMessageID)] }
         _ = try await runRaw(args: args)
     }
