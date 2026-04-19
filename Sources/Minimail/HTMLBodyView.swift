@@ -93,9 +93,13 @@ struct HTMLBodyView: NSViewRepresentable {
 
     private static func wrap(_ body: String) -> String {
         let prefersDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let bg = prefersDark ? "#1e1e20" : "#ffffff"
         let fg = prefersDark ? "#f5f5f7" : "#1d1d1f"
         let link = "#0a84ff"
+        // Transparent outer wrapper so the popover's glass background shows
+        // through for plain-text and minimally-styled emails. Marketing HTML
+        // that sets its own backgrounds still renders normally -- their inline
+        // styles win. The `!important` on html/body prevents stray inline
+        // styles from forcing opaque backgrounds on the top-level nodes.
         return """
         <!doctype html><html><head>
         <meta charset="utf-8">
@@ -104,16 +108,24 @@ struct HTMLBodyView: NSViewRepresentable {
           html, body {
             margin: 0;
             padding: 14px;
-            background: \(bg);
+            background: transparent !important;
             color: \(fg);
             font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
             -webkit-font-smoothing: antialiased;
             text-size-adjust: 100%;
           }
+          body > :first-child { margin-top: 0; }
           a { color: \(link); }
           img { max-width: 100%; height: auto; }
           img[src^="http"], img[src^="https"] { display: none; }
           table { max-width: 100% !important; }
+          /* Kill full-width background wrappers that marketing emails use
+             to paint the whole viewport. The inner content's own styling
+             still renders. */
+          body > table, body > div {
+            background: transparent !important;
+            background-color: transparent !important;
+          }
           pre, code { font-family: ui-monospace, "SF Mono", monospace; }
           blockquote {
             border-left: 3px solid rgba(127,127,127,0.2);

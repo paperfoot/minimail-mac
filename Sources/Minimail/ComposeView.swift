@@ -16,9 +16,9 @@ struct ComposeView: View {
 
             fromRow
             Divider().opacity(0.1)
-            tokenRow(label: "To", binding: $bound.composeTo, placeholder: "who")
+            tokenRow(label: "To", binding: $bound.composeTo, placeholder: "")
             Divider().opacity(0.1)
-            tokenRow(label: "Cc", binding: $bound.composeCc, placeholder: "optional")
+            tokenRow(label: "Cc", binding: $bound.composeCc, placeholder: "")
             Divider().opacity(0.1)
             textFieldRow(label: "Subject", binding: $bound.composeSubject, field: .subject)
             Divider().opacity(0.1)
@@ -77,17 +77,20 @@ struct ComposeView: View {
             } label: {
                 HStack(spacing: 6) {
                     AccountAvatar(email: state.currentAccount?.email ?? "?")
-                    Text(state.currentAccount?.email ?? "—")
+                    Text(state.currentAccount?.email ?? "No account")
                         .font(.system(size: 12))
                         .foregroundStyle(.primary)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.06), in: Capsule())
+                .contentShape(Capsule())
             }
-            .menuStyle(.borderlessButton)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
-            .fixedSize()
             Spacer()
         }
         .padding(.horizontal, 14)
@@ -150,26 +153,47 @@ struct ComposeView: View {
 
             Spacer()
 
-            Button {
-                sending = true
-                Task {
-                    _ = await state.send()
-                    sending = false
-                }
-            } label: {
-                if sending {
-                    ProgressView().controlSize(.small).frame(width: 46)
-                } else {
-                    Text("Send").frame(minWidth: 46)
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(sending || state.composeTo.isEmpty)
+            sendButton
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(sending || state.composeTo.isEmpty)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.primary.opacity(0.04))
+    }
+
+    @ViewBuilder
+    private var sendButton: some View {
+        Button {
+            sending = true
+            Task {
+                _ = await state.send()
+                sending = false
+            }
+        } label: {
+            HStack(spacing: 6) {
+                if sending {
+                    ProgressView().controlSize(.small).tint(.white)
+                }
+                Text(sending ? "Sending…" : "Send")
+                    .font(.system(size: 12, weight: .semibold))
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .opacity(sending ? 0 : 1)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .foregroundStyle(.white)
+            .background(
+                LinearGradient(
+                    colors: [Color.accentColor, Color.accentColor.opacity(0.85)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                in: Capsule()
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
