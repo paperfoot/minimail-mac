@@ -10,10 +10,31 @@ struct HTMLBodyView: NSViewRepresentable {
         let prefs = WKWebpagePreferences()
         prefs.allowsContentJavaScript = false
         config.defaultWebpagePreferences = prefs
+        // Use a non-persistent data store so cookies/caches don't leak between emails.
+        config.websiteDataStore = .nonPersistent()
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground") // transparent
         webView.navigationDelegate = context.coordinator
+
+        // Block ALL remote resource loads -- tracking pixels, CSS, fonts, iframes.
+        // WKNavigationDelegate only gates navigation; embedded resources need a
+        // content rule list to be blocked. (Codex review, 2026-04.)
+        let rules = """
+        [
+          {"trigger": {"url-filter": "^https?://.*",
+                       "resource-type": ["image","style-sheet","font","raw","media","svg-document","document","script","fetch","websocket","ping","other"]},
+           "action": {"type": "block"}}
+        ]
+        """
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "minimail-block-remote-\(UUID().uuidString)",
+            encodedContentRuleList: rules
+        ) { list, _ in
+            if let list {
+                webView.configuration.userContentController.add(list)
+            }
+        }
         return webView
     }
 
