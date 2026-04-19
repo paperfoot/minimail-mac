@@ -14,5 +14,10 @@ let package = Package(
                 .enableUpcomingFeature("StrictConcurrency"),
             ]
         ),
+        .testTarget(
+            name: "MinimailTests",
+            dependencies: ["Minimail"],
+            path: "Tests/MinimailTests"
+        ),
     ]
 )

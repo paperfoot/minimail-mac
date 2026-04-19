@@ -79,3 +79,30 @@ struct Stats: Decodable, Sendable {
     let archived: Int?
     let total: Int?
 }
+
+struct Attachment: Decodable, Sendable, Identifiable, Hashable {
+    let id: String
+    let filename: String?
+    let content_type: String?
+    let size: Int?
+    let downloaded: Bool?
+}
+
+struct Draft: Decodable, Sendable, Identifiable, Hashable {
+    let id: String
+    let account_email: String?
+    let to: [String]?
+    let cc: [String]?
+    let bcc: [String]?
+    let subject: String?
+    let text_body: String?
+    let html_body: String?
+    let reply_to_message_id: Int64?
+    let created_at: String?
+    let updated_at: String?
+}
+
+struct SignatureResponse: Decodable, Sendable {
+    let account: String?
+    let signature: String?
+}

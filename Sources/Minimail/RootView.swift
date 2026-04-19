@@ -5,11 +5,10 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            backgroundLayer
-                .ignoresSafeArea()
+            backgroundLayer.ignoresSafeArea()
 
             Group {
-                switch state.currentView {
+                switch state.router.currentView {
                 case .inbox:
                     InboxView()
                         .transition(.asymmetric(
@@ -31,6 +30,9 @@ struct RootView: View {
                 case .accountSwitcher:
                     AccountSwitcherView()
                         .transition(.move(edge: .top).combined(with: .opacity))
+                case .settings:
+                    SettingsStubView()
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
                 case .needsInstall:
                     NeedsInstallView()
                 }
@@ -38,8 +40,7 @@ struct RootView: View {
         }
         .frame(width: 420, height: 580)
         .clipped()
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentView)
-        .animation(.easeInOut(duration: 0.15), value: state.messages.count)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.router.currentView)
     }
 
     @ViewBuilder
@@ -70,5 +71,39 @@ struct NeedsInstallView: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct SettingsStubView: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Button { state.router.currentView = .inbox } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(IconButtonStyle())
+                Text("Settings").font(.system(size: 13, weight: .semibold))
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            Divider().opacity(0.25)
+
+            VStack(spacing: 10) {
+                Image(systemName: "gearshape.2")
+                    .font(.system(size: 32))
+                    .opacity(0.4)
+                Text("Settings coming in v0.2")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Account management, signatures, sync interval, and keyboard customization.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 }

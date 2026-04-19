@@ -3,12 +3,11 @@ import SwiftUI
 struct ComposeView: View {
     @Environment(AppState.self) private var state
     @FocusState private var focus: Field?
-    @State private var sending = false
 
-    enum Field { case to, cc, subject, body }
+    enum Field { case to, cc, bcc, subject, body }
 
     var body: some View {
-        @Bindable var bound = state
+        @Bindable var bound = state.compose
 
         VStack(spacing: 0) {
             header
@@ -16,30 +15,37 @@ struct ComposeView: View {
 
             fromRow
             Divider().opacity(0.1)
-            tokenRow(label: "To", binding: $bound.composeTo, placeholder: "")
+            tokenRow(label: "To", binding: $bound.to)
             Divider().opacity(0.1)
-            tokenRow(label: "Cc", binding: $bound.composeCc, placeholder: "")
+            tokenRow(label: "Cc", binding: $bound.cc)
             Divider().opacity(0.1)
-            textFieldRow(label: "Subject", binding: $bound.composeSubject, field: .subject)
+            tokenRow(label: "Bcc", binding: $bound.bcc)
+            Divider().opacity(0.1)
+            textFieldRow(label: "Subject", binding: $bound.subject, field: .subject)
             Divider().opacity(0.1)
 
-            bodyEditor(bound: $bound.composeBody)
+            TextEditor(text: $bound.body)
+                .font(.system(size: 13))
+                .padding(10)
+                .focused($focus, equals: .body)
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
 
             footer
         }
         .onAppear {
-            if state.composeTo.isEmpty { focus = .to }
-            else if state.composeBody.isEmpty { focus = .body }
+            if state.compose.to.isEmpty { focus = .to }
+            else if state.compose.body.isEmpty { focus = .body }
         }
     }
 
     private var header: some View {
         HStack(spacing: 6) {
             Button {
-                if let replyTo = state.composeReplyTo {
-                    state.currentView = .reader(replyTo)
+                if let id = state.compose.replyToID {
+                    state.router.currentView = .reader(id)
                 } else {
-                    state.currentView = .inbox
+                    state.router.currentView = .inbox
                 }
             } label: {
                 Image(systemName: "xmark")
@@ -47,13 +53,21 @@ struct ComposeView: View {
             .buttonStyle(IconButtonStyle())
             .keyboardShortcut(.cancelAction)
 
-            Text(state.composeReplyTo != nil ? "Reply" : "New message")
+            Text(title)
                 .font(.system(size: 13, weight: .semibold))
 
             Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    private var title: String {
+        if state.compose.replyToID != nil {
+            return state.compose.replyAll ? "Reply All" : "Reply"
+        }
+        if state.compose.forwardingID != nil { return "Forward" }
+        return "New message"
     }
 
     private var fromRow: some View {
@@ -63,11 +77,11 @@ struct ComposeView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 52, alignment: .leading)
             Menu {
-                ForEach(state.accounts) { acct in
+                ForEach(state.session.accounts) { acct in
                     Button {
-                        state.currentAccount = acct
+                        state.session.currentAccount = acct
                     } label: {
-                        if acct.email == state.currentAccount?.email {
+                        if acct.email == state.session.currentAccount?.email {
                             Label(acct.email, systemImage: "checkmark")
                         } else {
                             Text(acct.email)
@@ -76,8 +90,8 @@ struct ComposeView: View {
                 }
             } label: {
                 HStack(spacing: 6) {
-                    AccountAvatar(email: state.currentAccount?.email ?? "?")
-                    Text(state.currentAccount?.email ?? "No account")
+                    AccountAvatar(email: state.session.currentAccount?.email ?? "?")
+                    Text(state.session.currentAccount?.email ?? "No account")
                         .font(.system(size: 12))
                         .foregroundStyle(.primary)
                     Image(systemName: "chevron.down")
@@ -97,14 +111,14 @@ struct ComposeView: View {
         .padding(.vertical, 8)
     }
 
-    private func tokenRow(label: String, binding: Binding<String>, placeholder: String) -> some View {
+    private func tokenRow(label: String, binding: Binding<String>) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(label)
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
                 .frame(width: 52, alignment: .leading)
                 .padding(.top, 4)
-            EmailTokenField(text: binding, placeholder: placeholder)
+            EmailTokenField(text: binding, placeholder: "")
                 .frame(minHeight: 24)
         }
         .padding(.horizontal, 14)
@@ -126,18 +140,9 @@ struct ComposeView: View {
         .padding(.vertical, 8)
     }
 
-    private func bodyEditor(bound: Binding<String>) -> some View {
-        TextEditor(text: bound)
-            .font(.system(size: 13))
-            .padding(10)
-            .focused($focus, equals: .body)
-            .scrollContentBackground(.hidden) // transparent bg (macOS 13+)
-            .background(Color.clear)
-    }
-
     private var footer: some View {
         HStack {
-            if let err = state.composeError {
+            if let err = state.compose.error {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
                     .foregroundStyle(.red)
@@ -146,7 +151,7 @@ struct ComposeView: View {
                     .foregroundStyle(.red)
                     .lineLimit(1)
             } else {
-                Text(state.composeReplyTo != nil ? "Threaded reply · plain text" : "Plain text")
+                Text(subtitle)
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -155,21 +160,24 @@ struct ComposeView: View {
 
             sendButton
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(sending || state.composeTo.isEmpty)
+                .disabled(state.compose.isSending || state.compose.to.isEmpty)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.primary.opacity(0.04))
     }
 
+    private var subtitle: String {
+        if state.compose.replyToID != nil { return "Threaded reply · plain text" }
+        if state.compose.forwardingID != nil { return "Forward · plain text" }
+        return "Plain text"
+    }
+
     @ViewBuilder
     private var sendButton: some View {
+        let sending = state.compose.isSending
         Button {
-            sending = true
-            Task {
-                _ = await state.send()
-                sending = false
-            }
+            Task { _ = await state.send() }
         } label: {
             HStack(spacing: 6) {
                 if sending {

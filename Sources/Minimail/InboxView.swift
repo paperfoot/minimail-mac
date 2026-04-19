@@ -4,16 +4,19 @@ struct InboxView: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        @Bindable var bound = state
+        let inbox = state.inbox
+        let session = state.session
+
+        @Bindable var boundInbox = inbox
 
         VStack(spacing: 0) {
-            header
+            header(session: session)
             Divider().opacity(0.25)
-            folderRow
+            folderRow(inbox: inbox)
             Divider().opacity(0.15)
-            searchRow(bound: $bound.searchQuery)
+            searchRow(bound: $boundInbox.searchQuery)
             Divider().opacity(0.15)
-            if let err = state.inboxError {
+            if let err = inbox.error {
                 errorBanner(err)
             }
             messageList
@@ -21,14 +24,14 @@ struct InboxView: View {
         }
     }
 
-    private var header: some View {
+    private func header(session: SessionState) -> some View {
         HStack(spacing: 8) {
             Button {
-                state.currentView = .accountSwitcher
+                state.openAccountSwitcher()
             } label: {
                 HStack(spacing: 8) {
-                    AccountAvatar(email: state.currentAccount?.email ?? "?")
-                    Text(state.currentAccount?.email ?? "No account")
+                    AccountAvatar(email: session.currentAccount?.email ?? "?")
+                    Text(session.currentAccount?.email ?? "No account")
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -45,9 +48,7 @@ struct InboxView: View {
 
             Spacer()
 
-            Button {
-                state.startCompose()
-            } label: {
+            Button { state.startCompose() } label: {
                 Image(systemName: "square.and.pencil")
             }
             .buttonStyle(IconButtonStyle())
@@ -57,7 +58,7 @@ struct InboxView: View {
             Button {
                 Task { await state.refreshInbox() }
             } label: {
-                if state.syncState == .syncing {
+                if state.inbox.syncState == .syncing {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: "arrow.clockwise")
@@ -71,15 +72,16 @@ struct InboxView: View {
         .padding(.vertical, 10)
     }
 
-    private var folderRow: some View {
+    private func folderRow(inbox: InboxState) -> some View {
         HStack(spacing: 2) {
-            ForEach(AppState.Folder.allCases, id: \.self) { folder in
+            ForEach(InboxState.Folder.allCases, id: \.self) { folder in
                 FolderTab(
                     title: folder.rawValue,
-                    count: count(for: folder),
-                    selected: state.currentFolder == folder
+                    count: unreadCount(for: folder, inbox: inbox),
+                    selected: inbox.currentFolder == folder
                 ) {
-                    state.currentFolder = folder
+                    inbox.currentFolder = folder
+                    inbox.focusedRowIndex = -1
                 }
             }
             Spacer()
@@ -88,16 +90,10 @@ struct InboxView: View {
         .padding(.vertical, 6)
     }
 
-    private func count(for folder: AppState.Folder) -> Int? {
-        switch folder {
-        case .inbox:
-            let n = state.messages.filter { $0.direction == "received" && !$0.isArchived && $0.isUnread }.count
-            return n > 0 ? n : nil
-        case .sent:
-            return nil
-        case .archived:
-            return nil
-        }
+    private func unreadCount(for folder: InboxState.Folder, inbox: InboxState) -> Int? {
+        guard folder == .inbox else { return nil }
+        let n = inbox.messages.filter { $0.direction == "received" && !$0.isArchived && $0.isUnread }.count
+        return n > 0 ? n : nil
     }
 
     private func searchRow(bound: Binding<String>) -> some View {
@@ -123,7 +119,7 @@ struct InboxView: View {
             Text(text).font(.system(size: 11)).lineLimit(2)
             Spacer()
             Button {
-                state.inboxError = nil
+                state.inbox.error = nil
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9))
@@ -137,61 +133,56 @@ struct InboxView: View {
     }
 
     private var messageList: some View {
-        ScrollViewReader { proxy in
+        let visible = state.inbox.visible()
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    if state.visibleMessages.isEmpty, state.syncState != .syncing {
+                    if visible.isEmpty, state.inbox.syncState != .syncing {
                         emptyState
                     } else {
-                        ForEach(Array(state.visibleMessages.enumerated()), id: \.element.id) { idx, msg in
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, msg in
                             MessageRow(
                                 message: msg,
-                                isSelected: state.selectedMessage?.id == msg.id,
-                                isFocused: idx == state.focusedRowIndex
+                                isSelected: state.reader.loaded?.id == msg.id,
+                                isFocused: idx == state.inbox.focusedRowIndex
                             )
                             .id(msg.id)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                state.focusedRowIndex = idx
-                                Task { await state.open(message: msg) }
+                                state.inbox.focusedRowIndex = idx
+                                state.open(message: msg)
                             }
                             Divider().opacity(0.15)
                         }
                     }
                 }
             }
-            .onKeyPress(.upArrow) {
-                moveFocus(-1, proxy: proxy); return .handled
-            }
-            .onKeyPress(.downArrow) {
-                moveFocus(1, proxy: proxy); return .handled
-            }
+            .onKeyPress(.upArrow) { moveFocus(-1, visible: visible, proxy: proxy); return .handled }
+            .onKeyPress(.downArrow) { moveFocus(1, visible: visible, proxy: proxy); return .handled }
+            .onKeyPress("j") { moveFocus(1, visible: visible, proxy: proxy); return .handled }
+            .onKeyPress("k") { moveFocus(-1, visible: visible, proxy: proxy); return .handled }
             .onKeyPress(.return) {
-                let msgs = state.visibleMessages
-                let idx = state.focusedRowIndex
-                if idx >= 0, idx < msgs.count {
-                    Task { await state.open(message: msgs[idx]) }
+                let idx = state.inbox.focusedRowIndex
+                if idx >= 0, idx < visible.count {
+                    state.open(message: visible[idx])
                 }
                 return .handled
             }
-            .onKeyPress("j") { moveFocus(1, proxy: proxy); return .handled }
-            .onKeyPress("k") { moveFocus(-1, proxy: proxy); return .handled }
             .focusable()
         }
     }
 
-    private func moveFocus(_ delta: Int, proxy: ScrollViewProxy) {
-        let count = state.visibleMessages.count
-        guard count > 0 else { return }
+    private func moveFocus(_ delta: Int, visible: [Message], proxy: ScrollViewProxy) {
+        guard !visible.isEmpty else { return }
         let next: Int
-        if state.focusedRowIndex < 0 {
-            next = delta > 0 ? 0 : count - 1
+        if state.inbox.focusedRowIndex < 0 {
+            next = delta > 0 ? 0 : visible.count - 1
         } else {
-            next = max(0, min(count - 1, state.focusedRowIndex + delta))
+            next = max(0, min(visible.count - 1, state.inbox.focusedRowIndex + delta))
         }
-        state.focusedRowIndex = next
+        state.inbox.focusedRowIndex = next
         withAnimation(.easeOut(duration: 0.12)) {
-            proxy.scrollTo(state.visibleMessages[next].id, anchor: .center)
+            proxy.scrollTo(visible[next].id, anchor: .center)
         }
     }
 
@@ -209,28 +200,30 @@ struct InboxView: View {
     }
 
     private var emptyIcon: String {
-        switch state.currentFolder {
+        switch state.inbox.currentFolder {
         case .inbox: return "tray"
         case .sent: return "paperplane"
+        case .drafts: return "doc"
         case .archived: return "archivebox"
         }
     }
 
     private var emptyText: String {
-        if !state.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+        if !state.inbox.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
             return "No matches"
         }
-        switch state.currentFolder {
+        switch state.inbox.currentFolder {
         case .inbox: return "Inbox is empty"
         case .sent: return "Nothing sent yet"
+        case .drafts: return "No drafts"
         case .archived: return "No archived messages"
         }
     }
 
     private var footer: some View {
         HStack(spacing: 10) {
-            if state.totalUnread > 0 {
-                Text("\(state.totalUnread) unread")
+            if state.inbox.totalUnread > 0 {
+                Text("\(state.inbox.totalUnread) unread")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else {
@@ -239,25 +232,21 @@ struct InboxView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button {
-                Task { await state.markAllRead() }
-            } label: {
+            Button { Task { await state.markAllRead() } } label: {
                 Image(systemName: "checkmark.circle")
                     .font(.system(size: 13))
             }
             .buttonStyle(IconButtonStyle())
             .help("Mark all read")
-            .disabled(state.totalUnread == 0)
+            .disabled(state.inbox.totalUnread == 0)
 
-            Button {
-                // placeholder for settings — v0.2
-            } label: {
+            Button { state.router.currentView = .settings } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 13))
             }
             .buttonStyle(IconButtonStyle())
             .help("Settings")
-            .disabled(true)
+            .keyboardShortcut(",", modifiers: .command)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -304,14 +293,12 @@ struct MessageRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            // Unread dot: only reserves space when unread; read rows get left-flush.
             if message.isUnread {
                 Circle()
                     .fill(Color.accentColor)
                     .frame(width: 8, height: 8)
                     .padding(.top, 6)
             }
-
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(message.fromParts.name ?? message.fromParts.email)
@@ -348,9 +335,6 @@ struct MessageRow: View {
     }
 }
 
-/// Gmail-style relative dates: "2:14 PM" today, "Mon" this week, "Mar 15" this
-/// year, "3/15/24" older. Formatters are main-actor cached; views always call
-/// from the main actor anyway.
 @MainActor
 enum DateFormat {
     private static let iso: ISO8601DateFormatter = {
