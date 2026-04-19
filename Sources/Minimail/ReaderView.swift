@@ -13,15 +13,19 @@ struct ReaderView: View {
             if let detailed {
                 content(detailed)
             } else if let loadError {
-                VStack(spacing: 8) {
+                VStack(spacing: 10) {
                     Image(systemName: "exclamationmark.circle").font(.system(size: 28)).opacity(0.5)
-                    Text("Message no longer available")
-                        .font(.system(size: 13))
+                    Text("Couldn't load message")
+                        .font(.system(size: 13, weight: .semibold))
                     Text(loadError)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
+                    Button("Try again") {
+                        Task { await load() }
+                    }
+                    .controlSize(.small)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

@@ -64,8 +64,9 @@ actor EmailCLI {
         return resp.messages ?? []
     }
 
-    func readMessage(id: Int64) async throws -> Message {
-        try await runJSON(args: ["inbox", "read", String(id), "--json", "--no-mark-read"], as: Message.self)
+    func readMessage(id: Int64, markRead: Bool = false) async throws -> Message {
+        let args = ["inbox", "read", String(id), "--json", "--mark-read", markRead ? "true" : "false"]
+        return try await runJSON(args: args, as: Message.self)
     }
 
     func markRead(ids: [Int64]) async throws {

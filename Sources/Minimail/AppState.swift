@@ -93,13 +93,18 @@ final class AppState {
         }
     }
 
-    func refreshInbox() async {
+    /// Refresh the inbox. Set `pull: true` to hit Resend first (fetch new mail),
+    /// which is what the user expects when clicking the refresh button.
+    /// Cheap re-renders (e.g. after mark-read) pass `pull: false`.
+    func refreshInbox(pull: Bool = true) async {
         guard !accounts.isEmpty else { return }
         syncState = .syncing
         defer { syncState = .idle }
         do {
             let email = currentAccount?.email
-            // Pull a bigger batch so folder switching (Sent/Archived) has data too.
+            if pull {
+                try await cli.sync(account: email)
+            }
             async let inbox = cli.listInbox(account: email, archived: false, limit: 100)
             async let arch = cli.listInbox(account: email, archived: true, limit: 100)
             let (listA, listB) = try await (inbox, arch)
@@ -120,7 +125,7 @@ final class AppState {
         guard !ids.isEmpty else { return }
         do {
             try await cli.markRead(ids: ids)
-            await refreshInbox()
+            await refreshInbox(pull: false)
         } catch {
             inboxError = error.localizedDescription
         }
@@ -129,11 +134,11 @@ final class AppState {
     func open(message: Message) async {
         selectedMessage = message
         currentView = .reader(message.id)
-        // Fire-and-forget mark-as-read.
+        // Fire-and-forget mark-as-read (local DB only; no need to re-pull).
         if message.isUnread {
             Task { [id = message.id] in
                 try? await cli.markRead(ids: [id])
-                await refreshInbox()
+                await refreshInbox(pull: false)
             }
         }
     }
@@ -188,7 +193,7 @@ final class AppState {
             )
             clearCompose()
             currentView = .inbox
-            await refreshInbox()
+            await refreshInbox(pull: false)
             return true
         } catch {
             composeError = error.localizedDescription
