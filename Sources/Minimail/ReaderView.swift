@@ -60,28 +60,28 @@ struct ReaderView: View {
 
                 Menu {
                     Button("Mark as Unread") {
-                        Task {
-                            await state.markUnread(message: msg)
-                            state.back()
-                        }
+                        Task { await state.markUnread(message: msg) }
                     }
                     Divider()
                     Button("Delete…", role: .destructive) {
                         state.compose.pendingDeleteConfirm = msg.id
                     }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Image(systemName: "ellipsis")
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
-                .frame(width: 28, height: 28)
+                .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .help("More actions")
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .confirmationDialog(
-            "Delete permanently?",
+            "Delete this message?",
             isPresented: Binding(
                 get: { state.compose.pendingDeleteConfirm != nil },
                 set: { if !$0 { state.compose.pendingDeleteConfirm = nil } }
@@ -95,18 +95,29 @@ struct ReaderView: View {
                 }
                 state.compose.pendingDeleteConfirm = nil
             }
-            Button("Archive instead") {
-                if let msg = state.reader.loaded {
-                    Task { await state.archive(message: msg) }
-                }
-                state.compose.pendingDeleteConfirm = nil
-            }
             Button("Cancel", role: .cancel) {
                 state.compose.pendingDeleteConfirm = nil
             }
         } message: {
-            Text("This removes the message from your local mailbox. Use Archive to keep it out of the inbox without deleting.")
+            Text("You can't undo this. Archive keeps it out of the inbox instead.")
         }
+        .onKeyPress("j") {
+            state.openNext()
+            return .handled
+        }
+        .onKeyPress("k") {
+            state.openPrevious()
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            state.openNext()
+            return .handled
+        }
+        .onKeyPress(.upArrow) {
+            state.openPrevious()
+            return .handled
+        }
+        .focusable()
     }
 
     @ViewBuilder
@@ -236,9 +247,17 @@ struct ReaderView: View {
                 .controlSize(.small)
             }
             Spacer()
+            // Message position indicator — "3 of 24" style
+            if let msg = state.reader.loaded {
+                let list = state.inbox.visible()
+                if let idx = list.firstIndex(where: { $0.id == msg.id }) {
+                    Text("\(idx + 1) of \(list.count)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.04))
+        .padding(.vertical, 10)
     }
 }
