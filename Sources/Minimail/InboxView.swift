@@ -137,22 +137,61 @@ struct InboxView: View {
     }
 
     private var messageList: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                if state.visibleMessages.isEmpty, state.syncState != .syncing {
-                    emptyState
-                } else {
-                    ForEach(state.visibleMessages) { msg in
-                        MessageRow(
-                            message: msg,
-                            isSelected: state.selectedMessage?.id == msg.id
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture { Task { await state.open(message: msg) } }
-                        Divider().opacity(0.15)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if state.visibleMessages.isEmpty, state.syncState != .syncing {
+                        emptyState
+                    } else {
+                        ForEach(Array(state.visibleMessages.enumerated()), id: \.element.id) { idx, msg in
+                            MessageRow(
+                                message: msg,
+                                isSelected: state.selectedMessage?.id == msg.id,
+                                isFocused: idx == state.focusedRowIndex
+                            )
+                            .id(msg.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                state.focusedRowIndex = idx
+                                Task { await state.open(message: msg) }
+                            }
+                            Divider().opacity(0.15)
+                        }
                     }
                 }
             }
+            .onKeyPress(.upArrow) {
+                moveFocus(-1, proxy: proxy); return .handled
+            }
+            .onKeyPress(.downArrow) {
+                moveFocus(1, proxy: proxy); return .handled
+            }
+            .onKeyPress(.return) {
+                let msgs = state.visibleMessages
+                let idx = state.focusedRowIndex
+                if idx >= 0, idx < msgs.count {
+                    Task { await state.open(message: msgs[idx]) }
+                }
+                return .handled
+            }
+            .onKeyPress("j") { moveFocus(1, proxy: proxy); return .handled }
+            .onKeyPress("k") { moveFocus(-1, proxy: proxy); return .handled }
+            .focusable()
+        }
+    }
+
+    private func moveFocus(_ delta: Int, proxy: ScrollViewProxy) {
+        let count = state.visibleMessages.count
+        guard count > 0 else { return }
+        let next: Int
+        if state.focusedRowIndex < 0 {
+            next = delta > 0 ? 0 : count - 1
+        } else {
+            next = max(0, min(count - 1, state.focusedRowIndex + delta))
+        }
+        state.focusedRowIndex = next
+        withAnimation(.easeOut(duration: 0.12)) {
+            proxy.scrollTo(state.visibleMessages[next].id, anchor: .center)
         }
     }
 
@@ -260,6 +299,7 @@ struct FolderTab: View {
 struct MessageRow: View {
     let message: Message
     var isSelected: Bool = false
+    var isFocused: Bool = false
     @State private var hovered = false
 
     var body: some View {
@@ -296,7 +336,9 @@ struct MessageRow: View {
 
     @ViewBuilder
     private var rowBackground: some View {
-        if isSelected {
+        if isFocused {
+            Color.accentColor.opacity(0.18)
+        } else if isSelected {
             Color.accentColor.opacity(0.14)
         } else if hovered {
             Color.primary.opacity(0.05)

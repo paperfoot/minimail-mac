@@ -8,21 +8,37 @@ struct RootView: View {
             backgroundLayer
                 .ignoresSafeArea()
 
-            switch state.currentView {
-            case .inbox:
-                InboxView()
-            case .reader(let id):
-                ReaderView(messageID: id)
-            case .compose:
-                ComposeView()
-            case .accountSwitcher:
-                AccountSwitcherView()
-            case .needsInstall:
-                NeedsInstallView()
+            Group {
+                switch state.currentView {
+                case .inbox:
+                    InboxView()
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .leading).combined(with: .opacity),
+                            removal: .move(edge: .leading).combined(with: .opacity)
+                        ))
+                case .reader(let id):
+                    ReaderView(messageID: id)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .move(edge: .trailing).combined(with: .opacity)
+                        ))
+                case .compose:
+                    ComposeView()
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .bottom).combined(with: .opacity),
+                            removal: .move(edge: .bottom).combined(with: .opacity)
+                        ))
+                case .accountSwitcher:
+                    AccountSwitcherView()
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                case .needsInstall:
+                    NeedsInstallView()
+                }
             }
         }
         .frame(width: 420, height: 580)
-        .animation(.easeInOut(duration: 0.15), value: state.currentView)
+        .clipped()
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentView)
         .animation(.easeInOut(duration: 0.15), value: state.messages.count)
     }
 
