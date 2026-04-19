@@ -156,7 +156,11 @@ struct InboxView: View {
         return ScrollView {
             LazyVStack(spacing: 0) {
                 if visible.isEmpty {
-                    emptyState
+                    if state.inbox.syncState == .syncing {
+                        ProgressView().frame(maxWidth: .infinity).padding(.vertical, 40)
+                    } else {
+                        emptyState
+                    }
                 } else {
                     ForEach(visible) { draft in
                         DraftRow(draft: draft)

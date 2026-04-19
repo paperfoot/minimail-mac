@@ -101,6 +101,8 @@ final class ComposeState {
     var editingDraftID: String?
     var lastAutosaveAt: Date?
     var autosaveTask: Task<Void, Never>?
+    /// Guard against concurrent autosave runs that would double-create drafts.
+    var isAutosaving: Bool = false
 
     func clear() {
         autosaveTask?.cancel()
@@ -170,6 +172,32 @@ final class AppState {
             return
         }
         await refreshInbox(pull: false)
+        // Prefetch drafts so the Drafts tab doesn't flash empty-state when tapped.
+        await refreshDrafts()
+    }
+
+    // ── Reader navigation within the list ─────────────────────────────────
+
+    func openNext() {
+        let list = inbox.visible()
+        guard !list.isEmpty else { return }
+        let currentID = reader.loaded?.id
+        let idx = list.firstIndex { $0.id == currentID } ?? -1
+        let next = list.index(after: idx)
+        guard next < list.count else { return }
+        inbox.focusedRowIndex = next
+        open(message: list[next])
+    }
+
+    func openPrevious() {
+        let list = inbox.visible()
+        guard !list.isEmpty else { return }
+        let currentID = reader.loaded?.id
+        let idx = list.firstIndex { $0.id == currentID } ?? list.count
+        let prev = idx - 1
+        guard prev >= 0 else { return }
+        inbox.focusedRowIndex = prev
+        open(message: list[prev])
     }
 
     func refreshAccounts() async {
@@ -356,7 +384,13 @@ final class AppState {
     }
 
     private func performAutosave() async {
-        guard compose.hasContent else { return }
+        // Reentrancy guard: if a save is in flight, skip this call — the next
+        // keystroke will reschedule. Prevents a fast typist from storming
+        // createDraft with concurrent tasks (each picks up editingDraftID=nil).
+        guard !compose.isAutosaving, compose.hasContent else { return }
+        compose.isAutosaving = true
+        defer { compose.isAutosaving = false }
+
         let toList = splitAddresses(compose.to)
         let ccList = splitAddresses(compose.cc)
         let bccList = splitAddresses(compose.bcc)

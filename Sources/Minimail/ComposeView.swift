@@ -79,17 +79,27 @@ struct ComposeView: View {
             .keyboardShortcut("k", modifiers: [.command, .shift])
 
             Menu {
+                Button("Save & Close") {
+                    Task {
+                        await state.flushAutosave()
+                        state.router.currentView = .inbox
+                    }
+                }
+                Divider()
                 Button("Discard Draft", role: .destructive) {
                     Task { await state.discardDraft() }
                 }
                 .disabled(state.compose.editingDraftID == nil)
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "ellipsis")
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .frame(width: 28, height: 28)
+            .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .help("More actions")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -97,20 +107,23 @@ struct ComposeView: View {
 
     @ViewBuilder
     private var savedIndicator: some View {
-        if let _ = state.compose.editingDraftID {
-            Text(savedText)
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .padding(.leading, 4)
+        if state.compose.editingDraftID != nil {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(savedText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 4)
+            }
         }
     }
 
     private var savedText: String {
-        guard let at = state.compose.lastAutosaveAt else { return "Draft" }
+        guard let at = state.compose.lastAutosaveAt else { return "Draft saved" }
         let delta = Date().timeIntervalSince(at)
-        if delta < 5 { return "Saved" }
+        if delta < 3 { return "Saved" }
         if delta < 60 { return "Saved \(Int(delta))s ago" }
-        return "Draft"
+        let mins = Int(delta / 60)
+        return mins < 60 ? "Saved \(mins)m ago" : "Draft saved"
     }
 
     private func pickAttachments() {

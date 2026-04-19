@@ -78,41 +78,66 @@ struct NeedsInstallView: View {
 
 struct OnboardingView: View {
     @Environment(AppState.self) private var state
+    @State private var copied: String?
+
+    private let step1 = "email-cli profile add default --api-key-env RESEND_API_KEY"
+    private let step2 = "email-cli account add you@yourdomain.com --profile default --default"
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             Image(systemName: "envelope.open.fill")
                 .font(.system(size: 44))
                 .foregroundStyle(Color.accentColor)
-            Text("Welcome to Minimail")
-                .font(.system(size: 17, weight: .semibold))
-            Text("No accounts configured yet.")
+            Text("Welcome to Minimail").font(.headline)
+            Text("Minimail uses your Resend API key. Paste these into Terminal to set up your first account:")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Set up in your terminal:")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text("email-cli profile add default --api-key-env RESEND_API_KEY")
-                    .font(.system(.caption, design: .monospaced))
-                    .padding(8)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-                Text("email-cli account add you@yourdomain.com \\\n  --profile default --default")
-                    .font(.system(.caption, design: .monospaced))
-                    .padding(8)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                copyableCode(step1, index: 1)
+                copyableCode(step2, index: 2)
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 16)
 
             Button("Try again") {
                 Task { await state.bootstrap() }
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
+            .controlSize(.small)
         }
-        .padding(24)
+        .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func copyableCode(_ text: String, index: Int) -> some View {
+        HStack(spacing: 6) {
+            Text("\(index).").font(.system(size: 11)).foregroundStyle(.tertiary)
+            Text(text)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(nil)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+                copied = text
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    if copied == text { copied = nil }
+                }
+            } label: {
+                Image(systemName: copied == text ? "checkmark" : "doc.on.clipboard")
+                    .font(.system(size: 11))
+                    .foregroundStyle(copied == text ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Copy to clipboard")
+        }
+        .padding(8)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

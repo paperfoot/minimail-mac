@@ -63,12 +63,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Background mail check independent of the popover. Runs every 60s while
     /// the app is alive. After each refresh, diff new received messages against
-    /// the seen set and fire notifications.
+    /// the seen set and fire notifications. Skipped while the user is mid-
+    /// compose so their UI doesn't jitter during typing.
     private func startPollingForNewMail() {
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                if case .compose = self.appState.router.currentView { return }
                 await self.appState.refreshInbox(pull: true)
                 let received = self.appState.inbox.messages.filter { $0.direction == "received" }
                 MinimailNotifier.shared.notifyNewMessages(received)

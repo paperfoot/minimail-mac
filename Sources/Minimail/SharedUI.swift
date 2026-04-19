@@ -26,7 +26,10 @@ struct AttachmentChip: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(Color.primary.opacity(hovered ? 0.1 : 0.06), in: Capsule())
+            .background(.regularMaterial, in: Capsule())
+            .overlay(
+                Capsule().strokeBorder(Color.primary.opacity(hovered ? 0.18 : 0.1), lineWidth: 0.5)
+            )
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -77,7 +80,10 @@ struct ComposeAttachmentChip: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color.primary.opacity(hovered ? 0.1 : 0.06), in: Capsule())
+        .background(.regularMaterial, in: Capsule())
+        .overlay(
+            Capsule().strokeBorder(Color.primary.opacity(hovered ? 0.18 : 0.1), lineWidth: 0.5)
+        )
         .onHover { hovered = $0 }
     }
 }
@@ -124,33 +130,36 @@ struct FlowLayout: Layout {
     }
 }
 
-/// Row for the Drafts folder — drafts don't have a sender, so the layout is
-/// recipient-first with the "(Draft)" tag.
+/// Row for the Drafts folder. Drafts are outgoing work-in-progress, so the
+/// styling deliberately diverges from inbox rows: recipient prefixed with
+/// "To:", italicized subject (reads as "not yet sent"), and a relative
+/// "Edited" timestamp instead of the inbox "received at" format.
 struct DraftRow: View {
     let draft: Draft
     @State private var hovered = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("Draft")
-                .font(.system(size: 9, weight: .bold))
-                .padding(.horizontal, 4)
-                .padding(.vertical, 1)
-                .background(Color.orange.opacity(0.2), in: Capsule())
+            Image(systemName: "pencil.line")
+                .font(.system(size: 11))
                 .foregroundStyle(.orange)
-                .padding(.top, 2)
+                .padding(.top, 4)
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
+                HStack(spacing: 4) {
+                    Text("To:")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
                     Text(recipients)
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
                     Spacer()
-                    Text(DateFormat.inboxList(draft.updated_at ?? draft.created_at))
+                    Text(editedLabel)
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
                 Text(displaySubject)
                     .font(.system(size: 12))
+                    .italic()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -173,5 +182,13 @@ struct DraftRow: View {
             return body.isEmpty ? "(empty)" : String(body.prefix(80))
         }
         return s
+    }
+    private var editedLabel: String {
+        guard let date = DateFormat.parse(draft.updated_at ?? draft.created_at) else { return "" }
+        let delta = Date().timeIntervalSince(date)
+        if delta < 60 { return "Edited just now" }
+        if delta < 3600 { return "Edited \(Int(delta / 60))m ago" }
+        if delta < 86400 { return "Edited \(Int(delta / 3600))h ago" }
+        return "Edited " + DateFormat.inboxList(draft.updated_at ?? draft.created_at)
     }
 }
