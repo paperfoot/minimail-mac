@@ -16,12 +16,16 @@ struct ComposeView: View {
             fromRow
             Divider().opacity(0.1)
             tokenRow(label: "To", binding: $bound.to)
+                .onChange(of: state.compose.to) { _, _ in state.scheduleAutosave() }
             Divider().opacity(0.1)
             tokenRow(label: "Cc", binding: $bound.cc)
+                .onChange(of: state.compose.cc) { _, _ in state.scheduleAutosave() }
             Divider().opacity(0.1)
             tokenRow(label: "Bcc", binding: $bound.bcc)
+                .onChange(of: state.compose.bcc) { _, _ in state.scheduleAutosave() }
             Divider().opacity(0.1)
             textFieldRow(label: "Subject", binding: $bound.subject, field: .subject)
+                .onChange(of: state.compose.subject) { _, _ in state.scheduleAutosave() }
             Divider().opacity(0.1)
 
             if !state.compose.attachments.isEmpty {
@@ -35,6 +39,7 @@ struct ComposeView: View {
                 .focused($focus, equals: .body)
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
+                .onChange(of: state.compose.body) { _, _ in state.scheduleAutosave() }
 
             footer
         }
@@ -47,6 +52,7 @@ struct ComposeView: View {
     private var header: some View {
         HStack(spacing: 6) {
             Button {
+                Task { await state.flushAutosave() }
                 if let id = state.compose.replyToID {
                     state.router.currentView = .reader(id)
                 } else {
@@ -61,19 +67,50 @@ struct ComposeView: View {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
 
+            savedIndicator
+
             Spacer()
 
-            Button {
-                pickAttachments()
-            } label: {
+            Button { pickAttachments() } label: {
                 Image(systemName: "paperclip")
             }
             .buttonStyle(IconButtonStyle())
-            .help("Attach files")
+            .help("Attach files (⌘⇧K)")
             .keyboardShortcut("k", modifiers: [.command, .shift])
+
+            Menu {
+                Button("Discard Draft", role: .destructive) {
+                    Task { await state.discardDraft() }
+                }
+                .disabled(state.compose.editingDraftID == nil)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 28, height: 28)
+            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var savedIndicator: some View {
+        if let _ = state.compose.editingDraftID {
+            Text(savedText)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 4)
+        }
+    }
+
+    private var savedText: String {
+        guard let at = state.compose.lastAutosaveAt else { return "Draft" }
+        let delta = Date().timeIntervalSince(at)
+        if delta < 5 { return "Saved" }
+        if delta < 60 { return "Saved \(Int(delta))s ago" }
+        return "Draft"
     }
 
     private func pickAttachments() {

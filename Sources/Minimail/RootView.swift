@@ -35,6 +35,8 @@ struct RootView: View {
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 case .needsInstall:
                     NeedsInstallView()
+                case .onboarding:
+                    OnboardingView()
                 }
             }
         }
@@ -68,6 +70,46 @@ struct NeedsInstallView: View {
             Text("Then open Minimail again.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct OnboardingView: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "envelope.open.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(Color.accentColor)
+            Text("Welcome to Minimail")
+                .font(.system(size: 17, weight: .semibold))
+            Text("No accounts configured yet.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Set up in your terminal:")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("email-cli profile add default --api-key-env RESEND_API_KEY")
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                Text("email-cli account add you@yourdomain.com \\\n  --profile default --default")
+                    .font(.system(.caption, design: .monospaced))
+                    .padding(8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(.horizontal, 20)
+
+            Button("Try again") {
+                Task { await state.bootstrap() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
