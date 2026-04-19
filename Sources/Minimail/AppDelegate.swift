@@ -67,7 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// compose so their UI doesn't jitter during typing.
     private func startPollingForNewMail() {
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        let interval = max(30, UserDefaults.standard.integer(forKey: SettingsKey.syncIntervalSeconds))
+        let seconds = interval == 0 ? 60 : interval
+        pollTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(seconds), repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if case .compose = self.appState.router.currentView { return }
@@ -76,6 +78,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MinimailNotifier.shared.notifyNewMessages(received)
                 self.refreshStatusTitle()
             }
+        }
+
+        // Restart timer when the user changes the interval in Settings.
+        NotificationCenter.default.removeObserver(self, name: .minimailSyncIntervalChanged, object: nil)
+        NotificationCenter.default.addObserver(
+            forName: .minimailSyncIntervalChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.startPollingForNewMail() }
         }
     }
 

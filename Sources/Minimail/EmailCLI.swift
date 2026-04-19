@@ -49,9 +49,18 @@ actor EmailCLI {
     private var binaryPath: String?
 
     /// Called once at startup. Resolves the binary path; nil means not installed.
+    /// Priority: bundled inside the .app, then Homebrew, then Cargo, then PATH.
     func locate() async -> String? {
         if let cached = binaryPath { return cached }
-        // Common install locations, in order of likelihood.
+
+        // 1) Bundled helper — shipped inside Minimail.app/Contents/Resources.
+        if let bundleURL = Bundle.main.url(forResource: "email-cli", withExtension: nil),
+           FileManager.default.isExecutableFile(atPath: bundleURL.path) {
+            binaryPath = bundleURL.path
+            return bundleURL.path
+        }
+
+        // 2) Common system install locations.
         let candidates = [
             "/opt/homebrew/bin/email-cli",
             "/usr/local/bin/email-cli",
@@ -61,7 +70,8 @@ actor EmailCLI {
             binaryPath = path
             return path
         }
-        // Fallback: `which email-cli` via env.
+
+        // 3) `which email-cli` via env.
         if let resolved = try? await runPlain("/usr/bin/which", ["email-cli"]),
            !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let path = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -249,6 +259,14 @@ actor EmailCLI {
         let raw = try await runRaw(args: ["signature", "show", account, "--json"])
         let env = try JSONDecoder().decode(Envelope<SignatureResponse>.self, from: raw)
         return env.data?.signature
+    }
+
+    func setSignature(_ text: String, for account: String) async throws {
+        _ = try await runRaw(args: ["signature", "set", account, "--text", text, "--json"])
+    }
+
+    func setDefaultAccount(_ email: String) async throws {
+        _ = try await runRaw(args: ["account", "use", email, "--json"])
     }
 
     func sync(account: String?) async throws {
