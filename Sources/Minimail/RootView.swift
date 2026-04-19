@@ -31,7 +31,7 @@ struct RootView: View {
                     AccountSwitcherView()
                         .transition(.move(edge: .top).combined(with: .opacity))
                 case .settings:
-                    SettingsStubView()
+                    SettingsView()
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 case .needsInstall:
                     NeedsInstallView()
@@ -141,36 +141,3 @@ struct OnboardingView: View {
     }
 }
 
-struct SettingsStubView: View {
-    @Environment(AppState.self) private var state
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Button { state.router.currentView = .inbox } label: {
-                    Image(systemName: "chevron.left")
-                }
-                .buttonStyle(IconButtonStyle())
-                Text("Settings").font(.system(size: 13, weight: .semibold))
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            Divider().opacity(0.25)
-
-            VStack(spacing: 10) {
-                Image(systemName: "gearshape.2")
-                    .font(.system(size: 32))
-                    .opacity(0.4)
-                Text("Settings coming in v0.2")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("Account management, signatures, sync interval, and keyboard customization.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 28)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-}
