@@ -18,35 +18,59 @@ struct HTMLBodyView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
 
         // Block ALL remote resource loads -- tracking pixels, CSS, fonts, iframes.
-        // WKNavigationDelegate only gates navigation; embedded resources need a
-        // content rule list to be blocked. (Codex review, 2026-04.)
-        let rules = """
-        [
-          {"trigger": {"url-filter": "^https?://.*",
-                       "resource-type": ["image","style-sheet","font","raw","media","svg-document","document","script","fetch","websocket","ping","other"]},
-           "action": {"type": "block"}}
-        ]
-        """
+        // Compile-then-load race: if HTML loads before the rule list is added,
+        // tracking pixels fire. We gate the first load on the rule list install
+        // by queuing the HTML on the coordinator and flushing from the compile
+        // completion. Subsequent updates are safe because the list is installed.
+        context.coordinator.webView = webView
+
         WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: "minimail-block-remote-\(UUID().uuidString)",
-            encodedContentRuleList: rules
+            forIdentifier: "minimail-block-remote",
+            encodedContentRuleList: Self.blockRulesJSON
         ) { list, _ in
-            if let list {
-                webView.configuration.userContentController.add(list)
+            guard let list else {
+                // Failed to compile — still allow content through (rare).
+                context.coordinator.rulesReady = true
+                context.coordinator.flushPending()
+                return
             }
+            webView.configuration.userContentController.add(list)
+            context.coordinator.rulesReady = true
+            context.coordinator.flushPending()
         }
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         let wrapped = Self.wrap(html)
-        webView.loadHTMLString(wrapped, baseURL: nil)
+        context.coordinator.pendingHTML = wrapped
+        if context.coordinator.rulesReady {
+            context.coordinator.flushPending()
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    private static let blockRulesJSON: String = """
+    [
+      {"trigger": {"url-filter": "^https?://.*",
+                   "resource-type": ["image","style-sheet","font","raw","media","svg-document","document","script","fetch","websocket","ping","other"]},
+       "action": {"type": "block"}}
+    ]
+    """
+
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
+        weak var webView: WKWebView?
+        var rulesReady = false
+        var pendingHTML: String?
+
+        func flushPending() {
+            guard let html = pendingHTML, let webView else { return }
+            webView.loadHTMLString(html, baseURL: nil)
+            pendingHTML = nil
+        }
+
         // Block all remote resource loads so tracking pixels don't fire.
         func webView(_ webView: WKWebView,
                      decidePolicyFor navigationAction: WKNavigationAction,
