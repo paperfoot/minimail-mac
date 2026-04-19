@@ -45,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await appState.bootstrap()
             refreshStatusTitle()
         }
+
+        // Re-sync the menu bar title whenever unread count changes.
+        withObservationTracking {
+            _ = appState.totalUnread
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.refreshStatusTitle() }
+        }
     }
 
     @objc private func togglePopover(_ sender: Any?) {

@@ -37,12 +37,16 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
     let rfc_message_id: String?
     let in_reply_to: String?
     let last_event: String?
-    let is_read: Int?
+    let is_read: Bool?
     let created_at: String?
-    let archived: Int?
+    let archived: Bool?
 
-    var isUnread: Bool { (is_read ?? 0) == 0 && direction == "received" }
-    var displaySubject: String { subject?.isEmpty == false ? subject! : "(no subject)" }
+    var isUnread: Bool { !(is_read ?? true) && direction == "received" }
+    var isArchived: Bool { archived ?? false }
+    var displaySubject: String {
+        if let s = subject, !s.isEmpty { return s }
+        return "(no subject)"
+    }
 }
 
 struct InboxListResponse: Decodable, Sendable {

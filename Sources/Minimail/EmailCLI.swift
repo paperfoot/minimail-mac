@@ -55,25 +55,13 @@ actor EmailCLI {
         try await runJSON(args: ["account", "list", "--json"], as: [Account].self)
     }
 
-    func listInbox(account: String?, limit: Int = 50) async throws -> [Message] {
+    func listInbox(account: String?, archived: Bool = false, limit: Int = 50) async throws -> [Message] {
         var args = ["inbox", "list", "--json", "--limit", String(limit)]
         if let account { args += ["--account", account] }
-        // The inbox list endpoint returns either a bare array or a paginated
-        // { messages, has_more, next_cursor } shape depending on flags.
-        let data = try await runRaw(args: args)
-        let decoder = JSONDecoder()
-        // Try envelope-with-paginated first, then envelope-with-array.
-        if let paginated = try? decoder.decode(Envelope<InboxListResponse>.self, from: data),
-           paginated.status == "success",
-           let msgs = paginated.data?.messages {
-            return msgs
-        }
-        if let arr = try? decoder.decode(Envelope<[Message]>.self, from: data),
-           arr.status == "success",
-           let msgs = arr.data {
-            return msgs
-        }
-        throw CLIError.envelopeError("unexpected inbox list shape")
+        if archived { args += ["--archived"] }
+        // email-cli's inbox list always returns the paginated envelope.
+        let resp = try await runJSON(args: args, as: InboxListResponse.self)
+        return resp.messages ?? []
     }
 
     func readMessage(id: Int64) async throws -> Message {

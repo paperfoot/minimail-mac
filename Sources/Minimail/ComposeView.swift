@@ -14,19 +14,16 @@ struct ComposeView: View {
             header
             Divider().opacity(0.3)
 
-            composeField(label: "From", value: state.currentAccount?.email ?? "", editable: false)
-            Divider().opacity(0.15)
-            composeFieldBinding(label: "To", binding: $bound.composeTo, field: .to)
-            Divider().opacity(0.15)
-            composeFieldBinding(label: "Cc", binding: $bound.composeCc, field: .cc)
-            Divider().opacity(0.15)
-            composeFieldBinding(label: "Subject", binding: $bound.composeSubject, field: .subject)
-            Divider().opacity(0.15)
+            fromRow
+            Divider().opacity(0.1)
+            tokenRow(label: "To", binding: $bound.composeTo, placeholder: "who")
+            Divider().opacity(0.1)
+            tokenRow(label: "Cc", binding: $bound.composeCc, placeholder: "optional")
+            Divider().opacity(0.1)
+            textFieldRow(label: "Subject", binding: $bound.composeSubject, field: .subject)
+            Divider().opacity(0.1)
 
-            TextEditor(text: $bound.composeBody)
-                .font(.system(size: 13))
-                .padding(10)
-                .focused($focus, equals: .body)
+            bodyEditor(bound: $bound.composeBody)
 
             footer
         }
@@ -39,11 +36,16 @@ struct ComposeView: View {
     private var header: some View {
         HStack(spacing: 6) {
             Button {
-                state.currentView = state.composeReplyTo != nil ? .reader(state.composeReplyTo!) : .inbox
+                if let replyTo = state.composeReplyTo {
+                    state.currentView = .reader(replyTo)
+                } else {
+                    state.currentView = .inbox
+                }
             } label: {
                 Image(systemName: "xmark")
             }
             .buttonStyle(IconButtonStyle())
+            .keyboardShortcut(.cancelAction)
 
             Text(state.composeReplyTo != nil ? "Reply" : "New message")
                 .font(.system(size: 13, weight: .semibold))
@@ -54,22 +56,39 @@ struct ComposeView: View {
         .padding(.vertical, 10)
     }
 
-    private func composeField(label: String, value: String, editable: Bool) -> some View {
+    private var fromRow: some View {
         HStack(spacing: 10) {
-            Text(label)
+            Text("From")
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
                 .frame(width: 52, alignment: .leading)
-            Text(value)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                AccountAvatar(email: state.currentAccount?.email ?? "?")
+                Text(state.currentAccount?.email ?? "—")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
     }
 
-    private func composeFieldBinding(label: String, binding: Binding<String>, field: Field) -> some View {
+    private func tokenRow(label: String, binding: Binding<String>, placeholder: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+                .frame(width: 52, alignment: .leading)
+                .padding(.top, 4)
+            EmailTokenField(text: binding, placeholder: placeholder)
+                .frame(minHeight: 24)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    private func textFieldRow(label: String, binding: Binding<String>, field: Field) -> some View {
         HStack(spacing: 10) {
             Text(label)
                 .font(.system(size: 12))
@@ -84,15 +103,27 @@ struct ComposeView: View {
         .padding(.vertical, 8)
     }
 
+    private func bodyEditor(bound: Binding<String>) -> some View {
+        TextEditor(text: bound)
+            .font(.system(size: 13))
+            .padding(10)
+            .focused($focus, equals: .body)
+            .scrollContentBackground(.hidden) // transparent bg (macOS 13+)
+            .background(Color.clear)
+    }
+
     private var footer: some View {
         HStack {
-            if let err = state.errorBanner {
+            if let err = state.composeError {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red)
                 Text(err)
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
                     .lineLimit(1)
             } else {
-                Text(state.composeReplyTo != nil ? "Threaded reply" : "Plain text")
+                Text(state.composeReplyTo != nil ? "Threaded reply · plain text" : "Plain text")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -107,9 +138,9 @@ struct ComposeView: View {
                 }
             } label: {
                 if sending {
-                    ProgressView().controlSize(.small).frame(width: 40)
+                    ProgressView().controlSize(.small).frame(width: 46)
                 } else {
-                    Text("Send").frame(minWidth: 40)
+                    Text("Send").frame(minWidth: 46)
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -118,7 +149,7 @@ struct ComposeView: View {
             .disabled(sending || state.composeTo.isEmpty)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.quinary)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.04))
     }
 }
