@@ -57,10 +57,56 @@ struct ReaderView: View {
                 .buttonStyle(IconButtonStyle())
                 .help("Archive (⌘⌫)")
                 .keyboardShortcut(.delete, modifiers: .command)
+
+                Menu {
+                    Button("Mark as Unread") {
+                        Task {
+                            await state.markUnread(message: msg)
+                            state.back()
+                        }
+                    }
+                    Divider()
+                    Button("Delete…", role: .destructive) {
+                        state.compose.pendingDeleteConfirm = msg.id
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 28, height: 28)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .confirmationDialog(
+            "Delete permanently?",
+            isPresented: Binding(
+                get: { state.compose.pendingDeleteConfirm != nil },
+                set: { if !$0 { state.compose.pendingDeleteConfirm = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let id = state.compose.pendingDeleteConfirm,
+                   let msg = state.reader.loaded, msg.id == id {
+                    Task { await state.delete(message: msg) }
+                }
+                state.compose.pendingDeleteConfirm = nil
+            }
+            Button("Archive instead") {
+                if let msg = state.reader.loaded {
+                    Task { await state.archive(message: msg) }
+                }
+                state.compose.pendingDeleteConfirm = nil
+            }
+            Button("Cancel", role: .cancel) {
+                state.compose.pendingDeleteConfirm = nil
+            }
+        } message: {
+            Text("This removes the message from your local mailbox. Use Archive to keep it out of the inbox without deleting.")
+        }
     }
 
     @ViewBuilder
@@ -95,6 +141,10 @@ struct ReaderView: View {
                                 .padding(16)
                         }
                     }
+
+                    if !state.reader.attachments.isEmpty {
+                        attachmentsBar(messageID: msg.id)
+                    }
                 }
             }
         } else if let err = state.reader.error {
@@ -113,6 +163,37 @@ struct ReaderView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func attachmentsBar(messageID: Int64) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "paperclip")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Text("\(state.reader.attachments.count) attachment\(state.reader.attachments.count == 1 ? "" : "s")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            FlowLayout(spacing: 6) {
+                ForEach(state.reader.attachments) { att in
+                    AttachmentChip(attachment: att) {
+                        saveAttachment(att, messageID: messageID)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private func saveAttachment(_ attachment: Attachment, messageID: Int64) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = attachment.filename ?? "attachment"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { await state.downloadAttachment(attachment, messageID: messageID, to: url) }
         }
     }
 
