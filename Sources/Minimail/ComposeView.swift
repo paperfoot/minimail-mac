@@ -1,10 +1,21 @@
 import SwiftUI
+import UniformTypeIdentifiers
+import AppKit
 
 struct ComposeView: View {
     @Environment(AppState.self) private var state
     @FocusState private var focus: Field?
+    @State private var dropHighlight: Bool = false
+    @State private var sendWarning: SendWarning?
 
     enum Field { case to, cc, bcc, subject, body }
+
+    /// A warning surfaced on "Send" click that the user must acknowledge.
+    struct SendWarning: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
 
     var body: some View {
         @Bindable var bound = state.compose
@@ -46,6 +57,117 @@ struct ComposeView: View {
         .onAppear {
             if state.compose.to.isEmpty { focus = .to }
             else if state.compose.body.isEmpty { focus = .body }
+        }
+        // Drag files (from Finder etc.) onto any part of compose → attach.
+        .onDrop(of: [.fileURL], isTargeted: $dropHighlight) { providers in
+            handleDroppedProviders(providers)
+        }
+        .overlay {
+            if dropHighlight {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .padding(2)
+                    .allowsHitTesting(false)
+            }
+        }
+        // Cmd-Shift-V → pull the current pasteboard image into attachments.
+        // (NSTextView handles text paste natively; this only covers images,
+        //  which otherwise become unusable binary blobs in the body.)
+        .background(
+            Button("") { pasteImageFromClipboard() }
+                .keyboardShortcut("v", modifiers: [.command, .shift])
+                .opacity(0)
+                .allowsHitTesting(false)
+        )
+        .alert(item: $sendWarning) { warning in
+            Alert(
+                title: Text(warning.title),
+                message: Text(warning.message),
+                primaryButton: .default(Text("Send Anyway")) {
+                    Task { _ = await state.send() }
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+
+    /// Two soft guards before send: subject-empty warning and an
+    /// "attached-but-no-attachment" heuristic. Returns nil when clear.
+    private func validateBeforeSend() -> SendWarning? {
+        let subject = state.compose.subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        if subject.isEmpty {
+            return SendWarning(
+                title: "Send without a subject?",
+                message: "Recipients often filter out messages without a subject. You can go back and add one."
+            )
+        }
+        if state.compose.attachments.isEmpty {
+            let body = state.compose.body.lowercased()
+            let tokens = ["attached", "attaching", "attachment", "enclosed", "see attached"]
+            if tokens.contains(where: body.contains) {
+                return SendWarning(
+                    title: "You mentioned an attachment",
+                    message: "Your message references an attachment but nothing is attached. Send anyway?"
+                )
+            }
+        }
+        return nil
+    }
+
+    /// Shared send entrypoint — validations, then hands to AppState.
+    private func attemptSend() {
+        if let warning = validateBeforeSend() {
+            sendWarning = warning
+            return
+        }
+        Task { _ = await state.send() }
+    }
+
+    private func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
+        var accepted = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                accepted = true
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    let url: URL?
+                    if let data = item as? Data {
+                        url = URL(dataRepresentation: data, relativeTo: nil)
+                    } else if let u = item as? URL {
+                        url = u
+                    } else {
+                        url = nil
+                    }
+                    if let url {
+                        Task { @MainActor in
+                            if !state.compose.attachments.contains(url) {
+                                state.compose.attachments.append(url)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return accepted
+    }
+
+    /// Looks at the current system pasteboard. If an image is present, writes
+    /// it to a temp file (Minimail-paste-{timestamp}.png) and adds it to the
+    /// attachment list so Resend sends it as a proper attachment.
+    private func pasteImageFromClipboard() {
+        let pb = NSPasteboard.general
+        guard let images = pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage],
+              let image = images.first else { return }
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else { return }
+
+        let filename = "Minimail-paste-\(Int(Date().timeIntervalSince1970)).png"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        do {
+            try png.write(to: url)
+            state.compose.attachments.append(url)
+        } catch {
+            state.compose.error = "Couldn't save pasted image: \(error.localizedDescription)"
         }
     }
 
@@ -192,7 +314,7 @@ struct ComposeView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 52, alignment: .leading)
                 .padding(.top, 4)
-            EmailTokenField(text: binding, placeholder: "")
+            EmailTokenField(text: binding, placeholder: "", suggestions: state.contactIndex)
                 .frame(minHeight: 24)
         }
         .padding(.horizontal, 14)
@@ -270,7 +392,7 @@ struct ComposeView: View {
     private var sendButton: some View {
         let sending = state.compose.isSending
         Button {
-            Task { _ = await state.send() }
+            attemptSend()
         } label: {
             HStack(spacing: 6) {
                 if sending {

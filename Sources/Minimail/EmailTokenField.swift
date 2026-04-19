@@ -3,15 +3,20 @@ import SwiftUI
 
 /// NSTokenField wrapped for SwiftUI. Types an email → press comma/space/return →
 /// it becomes a pill chip. Full keyboard shortcuts work (⌘A, ⌘C, ⌘V, ⌘Z) because
-/// it's a real NSTextField subclass.
+/// it's a real NSTextField subclass. `suggestions` drives recipient autocomplete
+/// — the token field prefix-matches the typed substring against the list and
+/// surfaces the top matches in a dropdown.
 struct EmailTokenField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String = ""
+    /// Full address list (e.g. "Alice <a@x.com>" or "a@x.com"). Populated by
+    /// AppState from recent inbox messages.
+    var suggestions: [String] = []
 
     func makeNSView(context: Context) -> NSTokenField {
         let field = NSTokenField()
         field.tokenizingCharacterSet = CharacterSet(charactersIn: ", ;\n\t")
-        field.completionDelay = 0.1
+        field.completionDelay = 0.05
         field.delegate = context.coordinator
         field.placeholderString = placeholder
         field.isBordered = false
@@ -26,6 +31,7 @@ struct EmailTokenField: NSViewRepresentable {
     }
 
     func updateNSView(_ field: NSTokenField, context: Context) {
+        context.coordinator.parent = self
         let tokens = Self.tokens(from: text)
         let current = (field.objectValue as? [String]) ?? []
         if tokens != current {
@@ -44,7 +50,7 @@ struct EmailTokenField: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, NSTokenFieldDelegate {
-        let parent: EmailTokenField
+        var parent: EmailTokenField
         init(_ parent: EmailTokenField) { self.parent = parent }
 
         // SwiftUI binding <-> NSTokenField objectValue
@@ -67,6 +73,30 @@ struct EmailTokenField: NSViewRepresentable {
         func tokenField(_ tokenField: NSTokenField,
                         displayStringForRepresentedObject representedObject: Any) -> String? {
             representedObject as? String
+        }
+
+        /// Recipient autocomplete. NSTokenField invokes this for every keystroke
+        /// on the active token; return up to 8 matches ranked by substring hit.
+        /// Matching is case-insensitive against the raw address string (which
+        /// may include display name, e.g. "Alice <a@x.com>").
+        func tokenField(
+            _ tokenField: NSTokenField,
+            completionsForSubstring substring: String,
+            indexOfToken tokenIndex: Int,
+            indexOfSelectedItem selectedIndex: UnsafeMutablePointer<Int>?
+        ) -> [Any]? {
+            let query = substring.lowercased()
+            guard query.count >= 1 else { return [] }
+            var ranked: [(String, Int)] = []
+            for addr in parent.suggestions {
+                let lower = addr.lowercased()
+                if let range = lower.range(of: query) {
+                    let distance = lower.distance(from: lower.startIndex, to: range.lowerBound)
+                    ranked.append((addr, distance))
+                }
+            }
+            ranked.sort { $0.1 < $1.1 }
+            return Array(ranked.prefix(8).map(\.0))
         }
     }
 }

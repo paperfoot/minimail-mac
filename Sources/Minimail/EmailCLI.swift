@@ -101,6 +101,14 @@ actor EmailCLI {
         return try await runJSON(args: args, as: Message.self)
     }
 
+    /// Fetch every message that shares a thread with the given seed. CLI
+    /// walks `rfc_message_id` / `in_reply_to` / `references` on its end; we
+    /// just render the chronological list. Returns `[seed]` if no relatives.
+    func readThread(id: Int64) async throws -> [Message] {
+        let args = ["inbox", "thread", String(id), "--json"]
+        return try await runJSON(args: args, as: [Message].self)
+    }
+
     func markRead(ids: [Int64]) async throws {
         var args = ["inbox", "mark", "--read"]
         args += ids.map(String.init)
