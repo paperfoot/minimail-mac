@@ -46,11 +46,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refreshStatusTitle()
         }
 
-        // Re-sync the menu bar title whenever unread count changes.
+        // Re-sync the menu bar title whenever the unread count changes.
+        // withObservationTracking is one-shot; re-register inside onChange.
+        observeUnread()
+    }
+
+    private func observeUnread() {
         withObservationTracking {
             _ = appState.totalUnread
         } onChange: { [weak self] in
-            Task { @MainActor in self?.refreshStatusTitle() }
+            Task { @MainActor [weak self] in
+                self?.refreshStatusTitle()
+                self?.observeUnread()
+            }
         }
     }
 
