@@ -95,6 +95,7 @@ struct HTMLBodyView: NSViewRepresentable {
         let prefersDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let fg = prefersDark ? "#f5f5f7" : "#1d1d1f"
         let link = "#0a84ff"
+        let transformed = collapseQuotedText(body)
         // Transparent outer wrapper so the popover's glass background shows
         // through for plain-text and minimally-styled emails. Marketing HTML
         // that sets its own backgrounds still renders normally -- their inline
@@ -133,8 +134,83 @@ struct HTMLBodyView: NSViewRepresentable {
             color: rgba(127,127,127,0.9);
             margin: 12px 0;
           }
+          /* Collapsed-quote toggle injected by collapseQuotedText */
+          details.mm-quote {
+            margin: 8px 0 12px 0;
+          }
+          details.mm-quote > summary {
+            cursor: pointer;
+            display: inline-block;
+            padding: 2px 8px;
+            background: rgba(127,127,127,0.12);
+            border-radius: 10px;
+            font-size: 11px;
+            color: rgba(127,127,127,0.95);
+            list-style: none;
+            user-select: none;
+          }
+          details.mm-quote > summary::-webkit-details-marker { display: none; }
+          details.mm-quote[open] > summary { margin-bottom: 6px; }
         </style></head>
-        <body>\(body)</body></html>
+        <body>\(transformed)</body></html>
         """
+    }
+
+    /// Wrap every top-level blockquote in a `<details>` so the quoted reply
+    /// history is collapsed by default. Uses native HTML5 `<details>` which
+    /// works without JS — essential since our WKWebView disables scripts.
+    /// Leaves already-closed emails alone by matching on raw `<blockquote>`
+    /// / `</blockquote>` tags with a simple state machine (regex can't depth-
+    /// count, but we only need pair-balance per top level).
+    private static func collapseQuotedText(_ html: String) -> String {
+        let open = "<blockquote"
+        let close = "</blockquote>"
+        var out = ""
+        var idx = html.startIndex
+        var depth = 0
+
+        while idx < html.endIndex {
+            if depth == 0, html[idx...].hasPrefix(open) {
+                // Emit the summary wrapper only for the outermost blockquote.
+                out += "<details class=\"mm-quote\"><summary>Show quoted content</summary>"
+                depth = 1
+                // Consume "<blockquote" and keep scanning for the matching ">"
+                // so attributes stay intact.
+                let tagRange = html.range(of: ">", range: idx..<html.endIndex)
+                if let tagRange {
+                    out.append(contentsOf: html[idx..<tagRange.upperBound])
+                    idx = tagRange.upperBound
+                } else {
+                    out.append(contentsOf: html[idx...])
+                    break
+                }
+                continue
+            }
+            if html[idx...].hasPrefix(open) {
+                depth += 1
+                let tagRange = html.range(of: ">", range: idx..<html.endIndex)
+                if let tagRange {
+                    out.append(contentsOf: html[idx..<tagRange.upperBound])
+                    idx = tagRange.upperBound
+                } else {
+                    out.append(contentsOf: html[idx...])
+                    break
+                }
+                continue
+            }
+            if html[idx...].hasPrefix(close) {
+                out += close
+                idx = html.index(idx, offsetBy: close.count)
+                depth -= 1
+                if depth == 0 {
+                    out += "</details>"
+                }
+                if depth < 0 { depth = 0 }
+                continue
+            }
+            out.append(html[idx])
+            idx = html.index(after: idx)
+        }
+        return out
     }
 }

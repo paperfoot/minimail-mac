@@ -76,6 +76,12 @@ final class ReaderState {
     var attachments: [Attachment] = []
     /// Task owning the currently-running fetch so we can cancel on navigation.
     var inflight: Task<Void, Never>?
+    /// All messages in the current thread, oldest → newest. Contains at least
+    /// the currently-loaded message; >1 when the CLI finds related headers.
+    var thread: [Message] = []
+    /// IDs of thread messages the user has manually expanded in the reader.
+    /// The currently-loaded message is always treated as expanded.
+    var expandedThreadIDs: Set<Int64> = []
 }
 
 @MainActor
@@ -138,6 +144,29 @@ final class RouterState {
 
 // ── Root app state ────────────────────────────────────────────────────────
 
+/// A send that has been queued to run after a short delay so the user has a
+/// chance to hit Undo (Gmail/Superhuman pattern). Captures the full payload
+/// plus the metadata needed to restore the compose view on undo.
+struct PendingSend: Sendable {
+    let from: String?
+    let to: [String]
+    let cc: [String]
+    let bcc: [String]
+    let subject: String
+    let text: String?
+    let html: String?
+    let attachments: [URL]
+    let replyToMessageID: Int64?
+    let originalDraftID: String?
+    let queuedAt: Date
+    let deadline: Date
+}
+
+/// Transient status flash shown briefly after a successful send completes.
+enum TransientStatus: Equatable {
+    case sent
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -155,6 +184,25 @@ final class AppState {
 
     // Convenience at the root for things that cross concerns.
     var totalUnread: Int { inbox.totalUnread }
+
+    /// Queue snapshot for the in-flight undoable send. View layer watches this
+    /// to render the countdown toast; nil = no pending send.
+    var pendingSend: PendingSend?
+    private var pendingSendTask: Task<Void, Never>?
+    /// Brief "Sent" flash after a queued send completes successfully.
+    var transientStatus: TransientStatus?
+    private var transientClearTask: Task<Void, Never>?
+
+    /// Undo window (seconds). Matches Gmail's max.
+    static let undoSendWindow: TimeInterval = 10
+
+    /// Keyboard-help sheet visibility — `?` anywhere opens it.
+    var showKeyboardHelp: Bool = false
+
+    /// Cache of every address Minimail has seen in `from`, `to`, `cc`, `bcc`
+    /// across stored messages. Rebuilt from `inbox.messages` on each refresh.
+    /// Used by EmailTokenField for recipient autocomplete.
+    var contactIndex: [String] = []
 
     private let cli = EmailCLI.shared
 
@@ -233,6 +281,7 @@ final class AppState {
             let stats = try? await cli.stats(account: email)
             inbox.totalUnread = stats?.unread ?? inbox.messages.filter(\.isUnread).count
             inbox.error = nil
+            rebuildContactIndex()
         } catch {
             inbox.error = error.localizedDescription
             inbox.syncState = .error(error.localizedDescription)
@@ -259,6 +308,8 @@ final class AppState {
         reader.inflight?.cancel()
         reader.isLoading = true
         reader.attachments = []
+        reader.thread = []
+        reader.expandedThreadIDs = [id]
         let task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -281,8 +332,29 @@ final class AppState {
                !Task.isCancelled {
                 self.reader.attachments = list
             }
+            // Thread relatives: also best-effort. The CLI returns [seed] when
+            // there are no related headers, so we only swap in real multi-
+            // message threads to avoid noisy "1 of 1" chrome.
+            if !Task.isCancelled,
+               let thread = try? await self.cli.readThread(id: id),
+               !Task.isCancelled,
+               thread.count > 1 {
+                self.reader.thread = thread
+            }
         }
         reader.inflight = task
+    }
+
+    /// Load the full body for a thread sibling (user tapped a collapsed row).
+    func expandThreadMessage(_ id: Int64) async {
+        guard !reader.expandedThreadIDs.contains(id) else { return }
+        reader.expandedThreadIDs.insert(id)
+        // If the summary version is already in `thread`, just fetch the body
+        // and splice it in so the view updates.
+        guard let idx = reader.thread.firstIndex(where: { $0.id == id }) else { return }
+        if let full = try? await cli.readMessage(id: id, markRead: false) {
+            reader.thread[idx] = full
+        }
     }
 
     func back() {
@@ -458,6 +530,10 @@ final class AppState {
         router.currentView = .compose(nil)
     }
 
+    /// User-initiated send. Validates, captures a snapshot, returns the user
+    /// to the inbox, and queues the transmission behind a short undo window.
+    /// The old `cli.send` call is now invoked from `firePendingSend()` after
+    /// the delay expires.
     func send() async -> Bool {
         compose.error = nil
         let to = splitAddresses(compose.to)
@@ -467,32 +543,135 @@ final class AppState {
             compose.error = "Add at least one recipient"
             return false
         }
-        compose.isSending = true
-        defer { compose.isSending = false }
+        // If a previous queued send is still pending, fire it immediately so
+        // its payload doesn't sit behind the new one.
+        if pendingSend != nil {
+            await flushPendingSendNow()
+        }
 
+        let now = Date()
+        let snapshot = PendingSend(
+            from: session.currentAccount?.email,
+            to: to,
+            cc: cc,
+            bcc: bcc,
+            subject: compose.subject,
+            text: compose.body.isEmpty ? nil : compose.body,
+            html: nil,
+            attachments: compose.attachments,
+            replyToMessageID: compose.replyToID,
+            originalDraftID: compose.editingDraftID,
+            queuedAt: now,
+            deadline: now.addingTimeInterval(Self.undoSendWindow)
+        )
+
+        compose.clear()
+        router.currentView = .inbox
+        pendingSend = snapshot
+
+        pendingSendTask?.cancel()
+        pendingSendTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.undoSendWindow))
+            if Task.isCancelled { return }
+            await self?.firePendingSend()
+        }
+        return true
+    }
+
+    /// Actually run the CLI send for the queued snapshot. Safe to call even
+    /// if `pendingSend` was already cleared (idempotent).
+    private func firePendingSend() async {
+        guard let snap = pendingSend else { return }
         do {
             try await cli.send(
-                from: session.currentAccount?.email,
-                to: to,
-                cc: cc,
-                bcc: bcc,
-                subject: compose.subject,
-                text: compose.body.isEmpty ? nil : compose.body,
-                html: nil,
-                attachments: compose.attachments,
-                replyToMessageID: compose.replyToID
+                from: snap.from,
+                to: snap.to,
+                cc: snap.cc,
+                bcc: snap.bcc,
+                subject: snap.subject,
+                text: snap.text,
+                html: snap.html,
+                attachments: snap.attachments,
+                replyToMessageID: snap.replyToMessageID
             )
-            if let draftID = compose.editingDraftID {
+            if let draftID = snap.originalDraftID {
                 try? await cli.deleteDraft(id: draftID)
             }
-            compose.clear()
-            router.currentView = .inbox
+            pendingSend = nil
+            pendingSendTask = nil
+            flashStatus(.sent)
             await refreshInbox(pull: false)
             if inbox.currentFolder == .drafts { await refreshDrafts() }
-            return true
         } catch {
-            compose.error = error.localizedDescription
-            return false
+            pendingSend = nil
+            pendingSendTask = nil
+            inbox.error = "Send failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Cancel the pending send and restore the compose view with every field
+    /// exactly as the user left it. Called when the user hits Undo on the toast.
+    func undoPendingSend() {
+        guard let snap = pendingSend else { return }
+        pendingSendTask?.cancel()
+        pendingSendTask = nil
+        pendingSend = nil
+
+        compose.clear()
+        compose.to = snap.to.joined(separator: ", ")
+        compose.cc = snap.cc.joined(separator: ", ")
+        compose.bcc = snap.bcc.joined(separator: ", ")
+        compose.subject = snap.subject
+        compose.body = snap.text ?? ""
+        compose.attachments = snap.attachments
+        compose.replyToID = snap.replyToMessageID
+        compose.editingDraftID = snap.originalDraftID
+        router.currentView = .compose(snap.replyToMessageID)
+    }
+
+    /// Fire any in-flight pending send immediately. Called on popover close
+    /// / app quit so we don't lose the user's message.
+    func flushPendingSendNow() async {
+        pendingSendTask?.cancel()
+        pendingSendTask = nil
+        if pendingSend != nil {
+            await firePendingSend()
+        }
+    }
+
+    private func flashStatus(_ status: TransientStatus) {
+        transientStatus = status
+        transientClearTask?.cancel()
+        transientClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            if Task.isCancelled { return }
+            self?.transientStatus = nil
+        }
+    }
+
+    // ── Contacts index ────────────────────────────────────────────────────
+
+    /// Rebuild the autocomplete-friendly address list from messages currently
+    /// loaded into memory. Cheap; called after every inbox refresh.
+    func rebuildContactIndex() {
+        var seen: Set<String> = []
+        var ordered: [String] = []
+        // Most recent messages first so the most-used addresses bubble to the top.
+        for msg in inbox.messages.sorted(by: { ($0.created_at ?? "") > ($1.created_at ?? "") }) {
+            collect(&ordered, &seen, msg.from_addr)
+            for field in [msg.to, msg.cc, msg.bcc, msg.reply_to] {
+                for addr in field ?? [] { collect(&ordered, &seen, addr) }
+            }
+        }
+        contactIndex = ordered
+    }
+
+    private func collect(_ ordered: inout [String], _ seen: inout Set<String>, _ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        let key = trimmed.lowercased()
+        if seen.insert(key).inserted {
+            ordered.append(trimmed)
         }
     }
 

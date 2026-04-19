@@ -125,36 +125,10 @@ struct ReaderView: View {
         if let msg = state.reader.loaded {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    fromRow(msg)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                    Divider().opacity(0.3)
-
-                    Group {
-                        if let html = msg.html_body, !html.isEmpty {
-                            HTMLBodyView(html: html)
-                                .frame(minHeight: 300)
-                        } else if let text = msg.text_body, !text.isEmpty {
-                            Text(text)
-                                .font(.system(size: 13))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 14)
-                                .textSelection(.enabled)
-                        } else if state.reader.isLoading {
-                            ProgressView()
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 40)
-                        } else {
-                            Text("(no body)")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                                .padding(16)
-                        }
-                    }
-
-                    if !state.reader.attachments.isEmpty {
-                        attachmentsBar(messageID: msg.id)
+                    if state.reader.thread.count > 1 {
+                        threadStack(focusedID: msg.id)
+                    } else {
+                        singleMessage(msg)
                     }
                 }
             }
@@ -174,6 +148,82 @@ struct ReaderView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private func singleMessage(_ msg: Message) -> some View {
+        fromRow(msg)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        Divider().opacity(0.3)
+        body(for: msg)
+        if !state.reader.attachments.isEmpty {
+            attachmentsBar(messageID: msg.id)
+        }
+    }
+
+    @ViewBuilder
+    private func threadStack(focusedID: Int64) -> some View {
+        // Banner — simple count readout to orient the user.
+        HStack(spacing: 6) {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            Text("\(state.reader.thread.count) messages in this thread")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.03))
+        Divider().opacity(0.2)
+
+        ForEach(state.reader.thread) { m in
+            let expanded = state.reader.expandedThreadIDs.contains(m.id) || m.id == focusedID
+            if expanded {
+                fromRow(m)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                Divider().opacity(0.25)
+                body(for: m)
+                if m.id == focusedID && !state.reader.attachments.isEmpty {
+                    attachmentsBar(messageID: m.id)
+                }
+                Divider().opacity(0.2)
+            } else {
+                CollapsedThreadRow(message: m)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        Task { await state.expandThreadMessage(m.id) }
+                    }
+                Divider().opacity(0.15)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func body(for msg: Message) -> some View {
+        if let html = msg.html_body, !html.isEmpty {
+            HTMLBodyView(html: html)
+                .frame(minHeight: 280)
+        } else if let text = msg.text_body, !text.isEmpty {
+            Text(text)
+                .font(.system(size: 13))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .textSelection(.enabled)
+        } else if state.reader.isLoading && msg.id == state.reader.loaded?.id {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+        } else {
+            Text("(no body)")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .padding(16)
         }
     }
 
@@ -234,6 +284,35 @@ struct ReaderView: View {
             Text(DateFormat.readerHeader(msg.created_at))
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    private struct CollapsedThreadRow: View {
+        let message: Message
+
+        var body: some View {
+            HStack(alignment: .top, spacing: 10) {
+                AccountAvatar(email: message.fromParts.email)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(message.fromParts.name ?? message.fromParts.email)
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                        Spacer()
+                        Text(DateFormat.inboxList(message.created_at))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                    if let snippet = message.snippet, !snippet.isEmpty {
+                        Text(snippet)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
         }
     }
 

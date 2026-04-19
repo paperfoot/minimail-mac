@@ -4,7 +4,8 @@ struct RootView: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        ZStack {
+        @Bindable var bound = state
+        ZStack(alignment: .bottom) {
             backgroundLayer.ignoresSafeArea()
 
             Group {
@@ -39,10 +40,41 @@ struct RootView: View {
                     OnboardingView()
                 }
             }
+
+            if state.pendingSend != nil {
+                UndoSendToast()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if state.transientStatus == .sent {
+                SentFlashToast()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.opacity)
+            }
         }
         .frame(width: 420, height: 580)
         .clipped()
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.router.currentView)
+        .animation(.spring(response: 0.25, dampingFraction: 0.9), value: state.pendingSend == nil)
+        .animation(.easeOut(duration: 0.2), value: state.transientStatus)
+        // Global `?` shortcut → show the keyboard help sheet. `shift+/` covers
+        // keyboards that can't type `?` without shift. Escape closes it.
+        .background(
+            Button("") { state.showKeyboardHelp = true }
+                .keyboardShortcut("?", modifiers: [])
+                .opacity(0)
+                .allowsHitTesting(false)
+        )
+        .background(
+            Button("") { state.showKeyboardHelp = true }
+                .keyboardShortcut("/", modifiers: [.shift])
+                .opacity(0)
+                .allowsHitTesting(false)
+        )
+        .sheet(isPresented: $bound.showKeyboardHelp) {
+            KeyboardHelpView(isPresented: $bound.showKeyboardHelp)
+        }
     }
 
     @ViewBuilder
@@ -141,3 +173,64 @@ struct OnboardingView: View {
     }
 }
 
+/// Dark capsule toast shown at the bottom of the popover while a send is
+/// queued behind the undo window. Live countdown + Undo button. Tapping
+/// "Send now" skips the remaining delay.
+struct UndoSendToast: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        if let pending = state.pendingSend {
+            HStack(spacing: 10) {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.9))
+                TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                    let remaining = max(0, Int(pending.deadline.timeIntervalSince(context.date).rounded(.up)))
+                    Text("Sending in \(remaining)s")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white)
+                }
+                Spacer()
+                Button("Undo") { state.undoPendingSend() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.15), in: Capsule())
+                Button {
+                    Task { await state.flushPendingSendNow() }
+                } label: {
+                    Text("Send now")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.black.opacity(0.82), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+        }
+    }
+}
+
+/// Brief confirmation flash after a queued send finishes transmitting.
+struct SentFlashToast: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text("Sent")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.82), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+    }
+}

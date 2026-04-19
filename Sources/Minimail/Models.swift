@@ -43,12 +43,27 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
     let created_at: String?
     let synced_at: String?
     let archived: Bool?
+    /// One-line snippet supplied by `inbox list` / `search` / `thread`.
+    /// The full-message detail endpoint omits it (use `text_body` instead).
+    let text_preview: String?
 
     var isUnread: Bool { !(is_read ?? true) && direction == "received" }
     var isArchived: Bool { archived ?? false }
     var displaySubject: String {
         if let s = subject, !s.isEmpty { return s }
         return "(no subject)"
+    }
+    /// Best-effort preview line for Gmail-style row layout. Falls back to
+    /// the first line of the full text body when the list endpoint didn't
+    /// pre-compute one (e.g. older email-cli versions).
+    var snippet: String? {
+        if let preview = text_preview, !preview.isEmpty { return preview }
+        guard let body = text_body else { return nil }
+        return body.split(whereSeparator: { $0.isNewline })
+            .lazy
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first(where: { !$0.isEmpty && !$0.hasPrefix(">") })
+            .map { String($0.prefix(160)) }
     }
 
     /// Split "Name <email@host>" into (name?, email).

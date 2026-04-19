@@ -193,6 +193,9 @@ struct InboxView: View {
                                 state.inbox.focusedRowIndex = idx
                                 state.open(message: msg)
                             }
+                            .contextMenu {
+                                messageContextMenu(for: msg)
+                            }
                             Divider().opacity(0.15)
                         }
                     }
@@ -210,6 +213,39 @@ struct InboxView: View {
                 return .handled
             }
             .focusable()
+        }
+    }
+
+    @ViewBuilder
+    private func messageContextMenu(for msg: Message) -> some View {
+        Button("Open") { state.open(message: msg) }
+        Divider()
+        Button("Reply") {
+            state.open(message: msg)
+            state.startCompose(replyTo: msg)
+        }
+        Button("Reply All") {
+            state.open(message: msg)
+            state.startCompose(replyTo: msg, replyAll: true)
+        }
+        Button("Forward") {
+            state.open(message: msg)
+            state.startForward(of: msg)
+        }
+        Divider()
+        if msg.isUnread {
+            Button("Mark as Read") { Task { try? await EmailCLI.shared.markRead(ids: [msg.id]); await state.refreshInbox(pull: false) } }
+        } else if msg.direction == "received" {
+            Button("Mark as Unread") { Task { await state.markUnread(message: msg) } }
+        }
+        if msg.isArchived {
+            Button("Move to Inbox") { Task { try? await EmailCLI.shared.unarchive(ids: [msg.id]); await state.refreshInbox(pull: false) } }
+        } else {
+            Button("Archive") { Task { await state.archive(message: msg) } }
+        }
+        Divider()
+        Button("Delete", role: .destructive) {
+            Task { await state.delete(message: msg) }
         }
     }
 
@@ -334,26 +370,36 @@ struct MessageRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            if message.isUnread {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 8, height: 8)
-                    .padding(.top, 6)
+            // Unread indicator — always reserves 8pt so read/unread rows align.
+            Group {
+                if message.isUnread {
+                    Circle().fill(Color.accentColor).frame(width: 8, height: 8)
+                } else {
+                    Color.clear.frame(width: 8, height: 8)
+                }
             }
+            .padding(.top, 6)
+
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
+                HStack(spacing: 6) {
                     Text(message.fromParts.name ?? message.fromParts.email)
                         .font(.system(size: 13, weight: message.isUnread ? .semibold : .regular))
                         .lineLimit(1)
-                    Spacer()
+                    Spacer(minLength: 4)
                     Text(DateFormat.inboxList(message.created_at))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
                 Text(message.displaySubject)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12, weight: message.isUnread ? .medium : .regular))
                     .foregroundStyle(message.isUnread ? .primary : .secondary)
                     .lineLimit(1)
+                if let snippet = message.snippet, !snippet.isEmpty {
+                    Text(snippet)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
         }
         .padding(.horizontal, 12)
