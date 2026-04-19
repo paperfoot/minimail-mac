@@ -120,6 +120,17 @@ final class AppState {
         }
     }
 
+    func archive(message: Message) async {
+        do {
+            try await cli.archive(ids: [message.id])
+            currentView = .inbox
+            selectedMessage = nil
+            await refreshInbox(pull: false)
+        } catch {
+            inboxError = error.localizedDescription
+        }
+    }
+
     func markAllRead() async {
         let ids = messages.filter { $0.isUnread }.map(\.id)
         guard !ids.isEmpty else { return }

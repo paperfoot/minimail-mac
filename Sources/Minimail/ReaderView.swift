@@ -46,6 +46,7 @@ struct ReaderView: View {
                 Image(systemName: "chevron.left")
             }
             .buttonStyle(IconButtonStyle())
+            .keyboardShortcut(.escape, modifiers: [])
 
             Text(detailed?.displaySubject ?? state.selectedMessage?.displaySubject ?? "Loading…")
                 .font(.system(size: 13, weight: .semibold))
@@ -60,6 +61,17 @@ struct ReaderView: View {
                     Image(systemName: "arrowshape.turn.up.left")
                 }
                 .buttonStyle(IconButtonStyle())
+                .help("Reply (⌘R)")
+                .keyboardShortcut("r", modifiers: .command)
+
+                Button {
+                    Task { await state.archive(message: msg) }
+                } label: {
+                    Image(systemName: "archivebox")
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Archive (⌘⌫)")
+                .keyboardShortcut(.delete, modifiers: .command)
             }
         }
         .padding(.horizontal, 12)
@@ -97,21 +109,29 @@ struct ReaderView: View {
     }
 
     private func fromRow(_ msg: Message) -> some View {
-        HStack(spacing: 10) {
-            AccountAvatar(email: msg.from_addr)
+        let parts = msg.fromParts
+        return HStack(alignment: .top, spacing: 10) {
+            AccountAvatar(email: parts.email)
                 .scaleEffect(1.4)
                 .frame(width: 30, height: 30)
+                .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
-                Text(msg.from_addr)
-                    .font(.system(size: 12, weight: .medium))
+                Text(parts.name ?? parts.email)
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
-                Text((msg.to ?? []).joined(separator: ", "))
+                if parts.name != nil {
+                    Text(parts.email)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Text("to " + (msg.to ?? []).joined(separator: ", "))
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             Spacer()
-            Text(msg.created_at?.prefix(10) ?? "")
+            Text(DateFormat.readerHeader(msg.created_at))
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }

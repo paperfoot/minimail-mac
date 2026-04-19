@@ -62,12 +62,32 @@ struct ComposeView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
                 .frame(width: 52, alignment: .leading)
-            HStack(spacing: 6) {
-                AccountAvatar(email: state.currentAccount?.email ?? "?")
-                Text(state.currentAccount?.email ?? "—")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+            Menu {
+                ForEach(state.accounts) { acct in
+                    Button {
+                        state.currentAccount = acct
+                    } label: {
+                        if acct.email == state.currentAccount?.email {
+                            Label(acct.email, systemImage: "checkmark")
+                        } else {
+                            Text(acct.email)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    AccountAvatar(email: state.currentAccount?.email ?? "?")
+                    Text(state.currentAccount?.email ?? "—")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.primary)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
             Spacer()
         }
         .padding(.horizontal, 14)

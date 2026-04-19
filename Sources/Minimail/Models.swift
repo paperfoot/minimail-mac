@@ -31,14 +31,17 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
     let to: [String]?
     let cc: [String]?
     let bcc: [String]?
+    let reply_to: [String]?
     let subject: String?
     let text_body: String?
     let html_body: String?
     let rfc_message_id: String?
     let in_reply_to: String?
+    let references: [String]?
     let last_event: String?
     let is_read: Bool?
     let created_at: String?
+    let synced_at: String?
     let archived: Bool?
 
     var isUnread: Bool { !(is_read ?? true) && direction == "received" }
@@ -46,6 +49,20 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
     var displaySubject: String {
         if let s = subject, !s.isEmpty { return s }
         return "(no subject)"
+    }
+
+    /// Split "Name <email@host>" into (name?, email).
+    var fromParts: (name: String?, email: String) {
+        if let openIdx = from_addr.firstIndex(of: "<"),
+           let closeIdx = from_addr.firstIndex(of: ">"),
+           openIdx < closeIdx {
+            let rawName = from_addr[..<openIdx]
+                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let email = String(from_addr[from_addr.index(after: openIdx)..<closeIdx])
+            return (rawName.isEmpty ? nil : rawName, email)
+        }
+        return (nil, from_addr)
     }
 }
 

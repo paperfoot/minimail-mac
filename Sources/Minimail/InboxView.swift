@@ -143,9 +143,12 @@ struct InboxView: View {
                     emptyState
                 } else {
                     ForEach(state.visibleMessages) { msg in
-                        MessageRow(message: msg)
-                            .contentShape(Rectangle())
-                            .onTapGesture { Task { await state.open(message: msg) } }
+                        MessageRow(
+                            message: msg,
+                            isSelected: state.selectedMessage?.id == msg.id
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture { Task { await state.open(message: msg) } }
                         Divider().opacity(0.15)
                     }
                 }
@@ -237,11 +240,11 @@ struct FolderTab: View {
                 if let count {
                     Text(String(count))
                         .font(.system(size: 10, weight: .semibold))
-                        .padding(.horizontal, 5)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 1)
-                        .background(selected ? Color.white : Color.primary.opacity(0.12),
+                        .background(selected ? Color.accentColor : Color.primary.opacity(0.12),
                                     in: Capsule())
-                        .foregroundStyle(selected ? Color.accentColor : .primary)
+                        .foregroundStyle(selected ? Color.white : .secondary)
                 }
             }
             .padding(.horizontal, 10)
@@ -256,21 +259,26 @@ struct FolderTab: View {
 
 struct MessageRow: View {
     let message: Message
+    var isSelected: Bool = false
+    @State private var hovered = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Circle()
-                .fill(message.isUnread ? Color.accentColor : Color.clear)
-                .frame(width: 8, height: 8)
-                .padding(.top, 6)
+        HStack(alignment: .top, spacing: 8) {
+            // Unread dot: only reserves space when unread; read rows get left-flush.
+            if message.isUnread {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 8, height: 8)
+                    .padding(.top, 6)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text(senderDisplay(message.from_addr))
+                    Text(message.fromParts.name ?? message.fromParts.email)
                         .font(.system(size: 13, weight: message.isUnread ? .semibold : .regular))
                         .lineLimit(1)
                     Spacer()
-                    Text(compactDate(message.created_at))
+                    Text(DateFormat.inboxList(message.created_at))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
@@ -282,41 +290,93 @@ struct MessageRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .background(rowBackground)
+        .onHover { hovered = $0 }
     }
 
-    private func senderDisplay(_ raw: String) -> String {
-        if let openIdx = raw.firstIndex(of: "<") {
-            let name = raw[..<openIdx]
-                .trimmingCharacters(in: .whitespaces)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-            if !name.isEmpty { return name }
+    @ViewBuilder
+    private var rowBackground: some View {
+        if isSelected {
+            Color.accentColor.opacity(0.14)
+        } else if hovered {
+            Color.primary.opacity(0.05)
+        } else {
+            Color.clear
         }
-        return raw
     }
+}
 
-    private func compactDate(_ iso: String?) -> String {
-        guard let iso else { return "" }
-        let formats = [
-            "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
-            "yyyy-MM-dd'T'HH:mm:ssZ",
-            "yyyy-MM-dd HH:mm:ss",
-        ]
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        for fmt in formats {
-            formatter.dateFormat = fmt
-            if let date = formatter.date(from: iso) {
-                return Self.relative.localizedString(for: date, relativeTo: Date())
-            }
-        }
-        return String(iso.prefix(10))
-    }
-
-    private static let relative: RelativeDateTimeFormatter = {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
+/// Gmail-style relative dates: "2:14 PM" today, "Mon" this week, "Mar 15" this
+/// year, "3/15/24" older. Formatters are main-actor cached; views always call
+/// from the main actor anyway.
+@MainActor
+enum DateFormat {
+    private static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+    private static let isoNoFrac: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+    private static let sqlite: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+    private static let timeOnly: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "h:mm a"; return f
+    }()
+    private static let weekday: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "EEE"; return f
+    }()
+    private static let monthDay: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "MMM d"; return f
+    }()
+    private static let shortDate: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "M/d/yy"; return f
+    }()
+    private static let fullDate: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateStyle = .medium; f.timeStyle = .short; return f
+    }()
+
+    static func parse(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        if let d = iso.date(from: raw) { return d }
+        if let d = isoNoFrac.date(from: raw) { return d }
+        if let d = sqlite.date(from: raw) { return d }
+        return nil
+    }
+
+    static func inboxList(_ raw: String?) -> String {
+        guard let date = parse(raw) else { return "" }
+        let cal = Calendar.current
+        let now = Date()
+        if cal.isDateInToday(date) { return timeOnly.string(from: date) }
+        if cal.isDateInYesterday(date) { return "Yesterday" }
+        let days = cal.dateComponents([.day], from: date, to: now).day ?? 0
+        if days < 7 { return weekday.string(from: date) }
+        if cal.component(.year, from: date) == cal.component(.year, from: now) {
+            return monthDay.string(from: date)
+        }
+        return shortDate.string(from: date)
+    }
+
+    static func readerHeader(_ raw: String?) -> String {
+        guard let date = parse(raw) else { return "" }
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Today at " + timeOnly.string(from: date) }
+        if cal.isDateInYesterday(date) { return "Yesterday at " + timeOnly.string(from: date) }
+        let now = Date()
+        if cal.component(.year, from: date) == cal.component(.year, from: now) {
+            return monthDay.string(from: date) + " at " + timeOnly.string(from: date)
+        }
+        return fullDate.string(from: date)
+    }
 }
 
 struct IconButtonStyle: ButtonStyle {

@@ -75,6 +75,18 @@ actor EmailCLI {
         _ = try await runRaw(args: args + ["--json"])
     }
 
+    func archive(ids: [Int64]) async throws {
+        var args = ["inbox", "archive"]
+        args += ids.map(String.init)
+        _ = try await runRaw(args: args + ["--json"])
+    }
+
+    func unarchive(ids: [Int64]) async throws {
+        var args = ["inbox", "unarchive"]
+        args += ids.map(String.init)
+        _ = try await runRaw(args: args + ["--json"])
+    }
+
     func stats(account: String?) async throws -> Stats {
         var args = ["inbox", "stats", "--json"]
         if let account { args += ["--account", account] }
