@@ -7,7 +7,7 @@ struct AccountSwitcherView: View {
         VStack(spacing: 0) {
             HStack {
                 Button {
-                    state.currentView = .inbox
+                    state.router.currentView = .inbox
                 } label: {
                     Image(systemName: "chevron.left")
                 }
@@ -23,10 +23,10 @@ struct AccountSwitcherView: View {
 
             ScrollView {
                 VStack(spacing: 0) {
-                    ForEach(state.accounts) { account in
+                    ForEach(state.session.accounts) { account in
                         Button {
-                            state.currentAccount = account
-                            state.currentView = .inbox
+                            state.session.currentAccount = account
+                            state.router.currentView = .inbox
                             Task { await state.refreshInbox() }
                         } label: {
                             HStack(spacing: 10) {
@@ -42,7 +42,7 @@ struct AccountSwitcherView: View {
                                     }
                                 }
                                 Spacer()
-                                if state.currentAccount?.email == account.email {
+                                if state.session.currentAccount?.email == account.email {
                                     Image(systemName: "checkmark")
                                         .foregroundStyle(.blue)
                                         .font(.system(size: 12, weight: .semibold))

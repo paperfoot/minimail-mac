@@ -3,66 +3,51 @@ import SwiftUI
 struct ReaderView: View {
     let messageID: Int64
     @Environment(AppState.self) private var state
-    @State private var detailed: Message?
-    @State private var loadError: String?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.3)
-            if let detailed {
-                content(detailed)
-            } else if let loadError {
-                VStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.circle").font(.system(size: 28)).opacity(0.5)
-                    Text("Couldn't load message")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(loadError)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
-                    Button("Try again") {
-                        Task { await load() }
-                    }
-                    .controlSize(.small)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            content
             footer
-        }
-        .task(id: messageID) {
-            await load()
         }
     }
 
     private var header: some View {
         HStack(spacing: 6) {
-            Button {
-                state.back()
-            } label: {
+            Button { state.back() } label: {
                 Image(systemName: "chevron.left")
             }
             .buttonStyle(IconButtonStyle())
             .keyboardShortcut(.escape, modifiers: [])
 
-            Text(detailed?.displaySubject ?? state.selectedMessage?.displaySubject ?? "Loading…")
+            Text(state.reader.loaded?.displaySubject ?? "Loading…")
                 .font(.system(size: 13, weight: .semibold))
                 .lineLimit(1)
 
             Spacer()
 
-            if let msg = detailed {
-                Button {
-                    state.startCompose(replyTo: msg)
-                } label: {
+            if let msg = state.reader.loaded {
+                Button { state.startCompose(replyTo: msg) } label: {
                     Image(systemName: "arrowshape.turn.up.left")
                 }
                 .buttonStyle(IconButtonStyle())
                 .help("Reply (⌘R)")
                 .keyboardShortcut("r", modifiers: .command)
+
+                Button { state.startCompose(replyTo: msg, replyAll: true) } label: {
+                    Image(systemName: "arrowshape.turn.up.left.2")
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Reply All (⌘⇧R)")
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+
+                Button { state.startForward(of: msg) } label: {
+                    Image(systemName: "arrowshape.turn.up.right")
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("Forward (⌘⇧F)")
+                .keyboardShortcut("f", modifiers: [.command, .shift])
 
                 Button {
                     Task { await state.archive(message: msg) }
@@ -78,33 +63,56 @@ struct ReaderView: View {
         .padding(.vertical, 10)
     }
 
-    private func content(_ msg: Message) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                fromRow(msg)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                Divider().opacity(0.3)
+    @ViewBuilder
+    private var content: some View {
+        if let msg = state.reader.loaded {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    fromRow(msg)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                    Divider().opacity(0.3)
 
-                Group {
-                    if let html = msg.html_body, !html.isEmpty {
-                        HTMLBodyView(html: html)
-                            .frame(minHeight: 300)
-                    } else if let text = msg.text_body, !text.isEmpty {
-                        Text(text)
-                            .font(.system(size: 13))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 14)
-                            .textSelection(.enabled)
-                    } else {
-                        Text("(no body)")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .padding(16)
+                    Group {
+                        if let html = msg.html_body, !html.isEmpty {
+                            HTMLBodyView(html: html)
+                                .frame(minHeight: 300)
+                        } else if let text = msg.text_body, !text.isEmpty {
+                            Text(text)
+                                .font(.system(size: 13))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 14)
+                                .textSelection(.enabled)
+                        } else if state.reader.isLoading {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 40)
+                        } else {
+                            Text("(no body)")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .padding(16)
+                        }
                     }
                 }
             }
+        } else if let err = state.reader.error {
+            VStack(spacing: 10) {
+                Image(systemName: "exclamationmark.circle").font(.system(size: 28)).opacity(0.5)
+                Text("Couldn't load message")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(err)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                Button("Back to inbox") { state.back() }
+                    .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -139,10 +147,8 @@ struct ReaderView: View {
 
     private var footer: some View {
         HStack {
-            if let msg = detailed {
-                Button {
-                    state.startCompose(replyTo: msg)
-                } label: {
+            if let msg = state.reader.loaded {
+                Button { state.startCompose(replyTo: msg) } label: {
                     Label("Reply", systemImage: "arrowshape.turn.up.left")
                 }
                 .buttonStyle(.borderedProminent)
@@ -151,15 +157,7 @@ struct ReaderView: View {
             Spacer()
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.quinary)
-    }
-
-    private func load() async {
-        do {
-            detailed = try await EmailCLI.shared.readMessage(id: messageID)
-        } catch {
-            loadError = error.localizedDescription
-        }
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.04))
     }
 }

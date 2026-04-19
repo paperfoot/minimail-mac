@@ -9,6 +9,10 @@ actor EmailCLI {
         case nonZeroExit(code: Int32, stderr: String)
         case decode(Error)
         case envelopeError(String)
+        case rateLimited(String)
+        case configError(String)
+        case badInput(String)
+        case cancelled
 
         var errorDescription: String? {
             switch self {
@@ -20,7 +24,25 @@ actor EmailCLI {
                 return "failed to decode email-cli output: \(err.localizedDescription)"
             case .envelopeError(let msg):
                 return msg
+            case .rateLimited(let msg):
+                return "Rate limited: \(msg)"
+            case .configError(let msg):
+                return "Configuration error: \(msg)"
+            case .badInput(let msg):
+                return "Bad input: \(msg)"
+            case .cancelled:
+                return "Cancelled"
             }
+        }
+    }
+
+    /// Map email-cli's semantic exit codes (agent-info documents them).
+    private static func mapExit(_ code: Int32, stderr: String) -> CLIError {
+        switch code {
+        case 2: return .configError(stderr)
+        case 3: return .badInput(stderr)
+        case 4: return .rateLimited(stderr)
+        default: return .nonZeroExit(code: code, stderr: stderr)
         }
     }
 
@@ -93,7 +115,16 @@ actor EmailCLI {
         return try await runJSON(args: args, as: Stats.self)
     }
 
-    func send(from: String?, to: [String], cc: [String], bcc: [String], subject: String, text: String?, html: String?) async throws {
+    func send(
+        from: String?,
+        to: [String],
+        cc: [String],
+        bcc: [String],
+        subject: String,
+        text: String?,
+        html: String?,
+        replyToMessageID: Int64? = nil
+    ) async throws {
         var args = ["send", "--json"]
         if let from { args += ["--from", from] }
         for t in to { args += ["--to", t] }
@@ -102,7 +133,77 @@ actor EmailCLI {
         args += ["--subject", subject]
         if let text { args += ["--text", text] }
         if let html { args += ["--html", html] }
+        if let replyToMessageID { args += ["--reply-to-msg", String(replyToMessageID)] }
         _ = try await runRaw(args: args)
+    }
+
+    // ── New actions wired for future features ─────────────────────────────
+
+    func reply(
+        to id: Int64,
+        all: Bool,
+        from: String?,
+        cc: [String],
+        bcc: [String],
+        text: String?,
+        html: String?
+    ) async throws {
+        var args = ["reply", String(id), "--json"]
+        if let from { args += ["--from", from] }
+        if all { args += ["--all"] }
+        for c in cc { args += ["--cc", c] }
+        for b in bcc { args += ["--bcc", b] }
+        if let text { args += ["--text", text] }
+        if let html { args += ["--html", html] }
+        _ = try await runRaw(args: args)
+    }
+
+    func forward(
+        _ id: Int64,
+        from: String?,
+        to: [String],
+        cc: [String],
+        text: String?
+    ) async throws {
+        var args = ["forward", String(id), "--json"]
+        if let from { args += ["--from", from] }
+        for t in to { args += ["--to", t] }
+        for c in cc { args += ["--cc", c] }
+        if let text { args += ["--text", text] }
+        _ = try await runRaw(args: args)
+    }
+
+    func markUnread(ids: [Int64]) async throws {
+        var args = ["inbox", "mark", "--unread"]
+        args += ids.map(String.init)
+        _ = try await runRaw(args: args + ["--json"])
+    }
+
+    func delete(ids: [Int64]) async throws {
+        var args = ["inbox", "delete"]
+        args += ids.map(String.init)
+        _ = try await runRaw(args: args + ["--json"])
+    }
+
+    func listAttachments(messageID: Int64) async throws -> [Attachment] {
+        try await runJSON(args: ["attachments", "list", String(messageID), "--json"], as: [Attachment].self)
+    }
+
+    func downloadAttachment(messageID: Int64, attachmentID: String, to path: URL) async throws {
+        let args = ["attachments", "get", String(messageID), attachmentID, "--output", path.path, "--json"]
+        _ = try await runRaw(args: args)
+    }
+
+    func listDrafts(account: String?) async throws -> [Draft] {
+        var args = ["draft", "list", "--json"]
+        if let account { args += ["--account", account] }
+        return try await runJSON(args: args, as: [Draft].self)
+    }
+
+    func signature(for account: String) async throws -> String? {
+        let raw = try await runRaw(args: ["signature", "show", account, "--json"])
+        let env = try JSONDecoder().decode(Envelope<SignatureResponse>.self, from: raw)
+        return env.data?.signature
     }
 
     func sync(account: String?) async throws {
@@ -135,35 +236,82 @@ actor EmailCLI {
         return try await runPlainData(bin, args)
     }
 
-    /// Launches a subprocess, collects stdout, returns Data. Uses Process under
-    /// the hood (Subprocess is still maturing). Cancellation sends SIGTERM.
+    /// Launches a subprocess, drains stdout + stderr *while the child runs* so
+    /// large payloads can't deadlock on pipe buffer exhaustion. Cancellation
+    /// from Swift Task cancel sends SIGTERM to the child.
     private func runPlainData(_ binary: String, _ args: [String]) async throws -> Data {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: binary)
-            process.arguments = args
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = args
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
 
-            process.terminationHandler = { proc in
-                let stdout = (try? stdoutPipe.fileHandleForReading.readToEnd()) ?? Data()
-                let stderr = String(
-                    data: (try? stderrPipe.fileHandleForReading.readToEnd()) ?? Data(),
-                    encoding: .utf8
-                ) ?? ""
-                if proc.terminationStatus == 0 {
-                    cont.resume(returning: stdout)
+        let stdoutCollector = AsyncDataCollector(pipe: stdoutPipe)
+        let stderrCollector = AsyncDataCollector(pipe: stderrPipe)
+
+        try process.run()
+
+        return try await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                process.terminationHandler = { _ in cont.resume() }
+            }
+            let stdoutData = await stdoutCollector.finish()
+            let stderrData = await stderrCollector.finish()
+            let code = process.terminationStatus
+            if code == 0 {
+                return stdoutData
+            }
+            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+            throw Self.mapExit(code, stderr: stderr)
+        } onCancel: {
+            // Task cancelled — terminate the child cleanly.
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+    }
+
+    /// Streams one pipe's bytes in the background while the child runs. Keeping
+    /// the pipe drained prevents SIGPIPE / deadlock on bodies >64KB.
+    private final class AsyncDataCollector: @unchecked Sendable {
+        private let pipe: Pipe
+        private let queue = DispatchQueue(label: "minimail.pipe-drain")
+        private var buffer = Data()
+        private var done = false
+        private var waiter: CheckedContinuation<Data, Never>?
+
+        init(pipe: Pipe) {
+            self.pipe = pipe
+            pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                guard let self else { return }
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    // EOF
+                    handle.readabilityHandler = nil
+                    self.queue.async {
+                        self.done = true
+                        self.waiter?.resume(returning: self.buffer)
+                        self.waiter = nil
+                    }
                 } else {
-                    cont.resume(throwing: CLIError.nonZeroExit(code: proc.terminationStatus, stderr: stderr))
+                    self.queue.async {
+                        self.buffer.append(chunk)
+                    }
                 }
             }
+        }
 
-            do {
-                try process.run()
-            } catch {
-                cont.resume(throwing: error)
+        func finish() async -> Data {
+            await withCheckedContinuation { (cont: CheckedContinuation<Data, Never>) in
+                queue.async {
+                    if self.done {
+                        cont.resume(returning: self.buffer)
+                    } else {
+                        self.waiter = cont
+                    }
+                }
             }
         }
     }
