@@ -31,7 +31,7 @@ struct KeyboardHelpView: View {
                         ("↩", "Open selected message"),
                         ("⎋", "Back to inbox / close sheet"),
                         ("⌘ ,", "Settings"),
-                        ("?", "This help"),
+                        ("⌘ /", "This help"),
                     ])
                     section("Inbox", rows: [
                         ("⌘ N", "New message"),

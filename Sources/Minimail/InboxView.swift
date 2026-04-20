@@ -296,7 +296,11 @@ struct InboxView: View {
                 }
                 return .handled
             }
+            // Scroll view needs focus to receive onKeyPress events, but the
+            // default macOS focus ring looks like a selection rectangle
+            // around the whole list — hide it, keyboard nav still works.
             .focusable()
+            .focusEffectDisabled()
         }
     }
 
