@@ -24,6 +24,7 @@ struct SettingsView: View {
     @State private var signatureSaving: Bool = false
     @State private var signatureSaved: Date?
     @AppStorage(SettingsKey.syncIntervalSeconds) private var syncInterval: Int = 60
+    @AppStorage(MetricsManager.enabledKey) private var diagnosticsEnabled: Bool = true
 
     private let intervalOptions: [(label: String, seconds: Int)] = [
         ("30 seconds", 30),
@@ -46,6 +47,8 @@ struct SettingsView: View {
                     syncSection
                     Divider().opacity(0.15)
                     notificationsSection
+                    Divider().opacity(0.15)
+                    diagnosticsSection
                     Divider().opacity(0.15)
                     aboutSection
                 }
@@ -234,6 +237,48 @@ struct SettingsView: View {
                 .controlSize(.small)
             }
             .padding(.top, 4)
+        }
+    }
+
+    // ── Diagnostics ──────────────────────────────────────────────────────
+
+    private var diagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Diagnostics",
+                         subtitle: "Local crash and performance data — nothing is uploaded")
+            Toggle(isOn: $diagnosticsEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Collect local diagnostics")
+                        .font(.system(size: 12))
+                    Text("Uses Apple's MetricKit. Data stays on this Mac and is never sent to us or third parties. Turn off to stop collection entirely.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .onChange(of: diagnosticsEnabled) { _, _ in
+                MetricsManager.shared.applyCurrentSetting()
+            }
+
+            HStack {
+                Image(systemName: "folder")
+                    .foregroundStyle(.tertiary)
+                Text("Show diagnostics folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Open") {
+                    if let url = MetricsManager.diagnosticsDirectoryURL() {
+                        try? FileManager.default.createDirectory(
+                            at: url, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .controlSize(.small)
+            }
+            .padding(.top, 2)
         }
     }
 

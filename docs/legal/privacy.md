@@ -11,7 +11,8 @@ Minimail is a macOS email client published by **Paperfoot AI (SG) Pte. Ltd.** ("
 
 - Minimail stores your mail locally on your Mac. We do not run a server and we do not see your messages.
 - Outgoing and incoming email is handled by **Resend** (your own Resend account). Resend is your email provider, not us.
-- We do not include analytics, telemetry, crash reporting, or advertising SDKs by default.
+- **Local diagnostics are ON by default.** Minimail uses Apple's MetricKit to collect crash reports and performance metrics **on your Mac only**. The data is written to `~/Library/Application Support/Minimail/diagnostics/` and is never uploaded. You can turn this off any time in Settings → Diagnostics, or delete the folder directly.
+- We do not include analytics, third-party tracking, or advertising SDKs.
 - License activation (after the paid release) sends a license key and a machine identifier to our license server. Nothing else.
 
 ## 2. Data stored on your device
@@ -39,9 +40,13 @@ This data never leaves your Mac via Minimail. If you delete the app and the data
 
 ## 4. Data we do not collect
 
-- We do not send analytics or telemetry by default. If we add an opt-in crash / performance reporter in the future (for example, Apple's `MetricKit`), you will see a toggle in Settings and it will be off by default.
+- **We do not receive any diagnostics data.** MetricKit writes crash and performance payloads to a folder on your Mac; nothing is uploaded to us or any third party. If we ever add an opt-in upload to help us debug issues you report, it will ship as a separate, clearly labelled checkbox — not silently switched on.
 - We do not embed third-party advertising, marketing, or tracking SDKs.
 - We do not read or transmit your email bodies. The only components that see your email bodies are your Mac, your Resend account, and the normal recipients of the mail you send.
+
+### What's in the MetricKit payloads
+
+Apple's MetricKit delivers OS-aggregated data once per day. Typical fields include app launch time, memory usage, CPU time, disk I/O, network byte counts, battery usage, and anonymised crash traces with stack frames. The payloads **do not** contain: email content, contact lists, account names, API keys, recipient addresses, subject lines, attachment names, or any other identifiable content from inside the app. You can open any `.json` file in the diagnostics folder to see exactly what Apple handed to the app.
 
 ## 5. Retention
 
