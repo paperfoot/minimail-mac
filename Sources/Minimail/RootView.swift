@@ -58,17 +58,13 @@ struct RootView: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.router.currentView)
         .animation(.spring(response: 0.25, dampingFraction: 0.9), value: state.pendingSend == nil)
         .animation(.easeOut(duration: 0.2), value: state.transientStatus)
-        // Global `?` shortcut → show the keyboard help sheet. `shift+/` covers
-        // keyboards that can't type `?` without shift. Escape closes it.
+        // ⌘/ shows the keyboard help sheet. We require ⌘ because a bare `?`
+        // global shortcut would swallow typed `?` / `/` in every text field
+        // (search box, compose body, subject, etc.).  ⌘/ matches Gmail's
+        // keyboard-help conventions on web too.
         .background(
             Button("") { state.showKeyboardHelp = true }
-                .keyboardShortcut("?", modifiers: [])
-                .opacity(0)
-                .allowsHitTesting(false)
-        )
-        .background(
-            Button("") { state.showKeyboardHelp = true }
-                .keyboardShortcut("/", modifiers: [.shift])
+                .keyboardShortcut("/", modifiers: .command)
                 .opacity(0)
                 .allowsHitTesting(false)
         )

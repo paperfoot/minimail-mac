@@ -10,6 +10,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pollTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // LSUIElement apps don't get a default menu, which means NSTextField
+        // never receives the standard ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z key equivalents
+        // — Cocoa routes those through Edit-menu items, not NSTextField's
+        // internal handling. Install a minimal Edit menu so all text inputs
+        // behave correctly. This is the Apple-sanctioned pattern for
+        // accessory apps (cf. "Menu Bar Extras" in Human Interface Guidelines).
+        Self.installMinimalMenuBar()
+
         MinimailNotifier.shared.popoverOpener = self
         MinimailNotifier.shared.register()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -147,6 +155,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
         }
+    }
+
+    /// Build and install a minimal NSMenu so the standard Cocoa text-editing
+    /// key equivalents work inside the popover. An LSUIElement app starts
+    /// with `NSApp.mainMenu == nil`, which silently breaks ⌘A / ⌘Z / even
+    /// the default `performTextFinderAction:` routing for NSTextField.
+    /// Installing an Edit menu with the canonical selectors fixes every
+    /// text field, rich-text editor, and WebKit view in one shot.
+    private static func installMinimalMenuBar() {
+        let mainMenu = NSMenu()
+
+        // App menu (required so the Edit menu isn't the leftmost and so
+        // ⌘Q works even though the app is an accessory).
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "Hide Minimail",
+                        action: #selector(NSApplication.hide(_:)),
+                        keyEquivalent: "h")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit Minimail",
+                        action: #selector(NSApplication.terminate(_:)),
+                        keyEquivalent: "q")
+
+        // Edit menu — the whole point of this function.
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+
+        let undo = editMenu.addItem(withTitle: "Undo",
+                                    action: Selector(("undo:")), keyEquivalent: "z")
+        undo.keyEquivalentModifierMask = [.command]
+        let redo = editMenu.addItem(withTitle: "Redo",
+                                    action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut",
+                         action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy",
+                         action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste",
+                         action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let pasteMatch = editMenu.addItem(withTitle: "Paste and Match Style",
+                                          action: Selector(("pasteAsPlainText:")),
+                                          keyEquivalent: "v")
+        pasteMatch.keyEquivalentModifierMask = [.command, .option, .shift]
+        editMenu.addItem(withTitle: "Delete",
+                         action: #selector(NSText.delete(_:)), keyEquivalent: "")
+        editMenu.addItem(withTitle: "Select All",
+                         action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        // Format submenu provides ⌘B / ⌘I / ⌘U for the rich-text compose
+        // editor. NSTextView responds to these automatically via NSFontManager
+        // when the menu items are present.
+        editMenu.addItem(NSMenuItem.separator())
+        let formatItem = editMenu.addItem(withTitle: "Format",
+                                          action: nil, keyEquivalent: "")
+        let formatMenu = NSMenu(title: "Format")
+        formatItem.submenu = formatMenu
+        let bold = formatMenu.addItem(withTitle: "Bold",
+                                      action: Selector(("addFontTrait:")),
+                                      keyEquivalent: "b")
+        bold.tag = 2  // NSFontManager.addFontTrait reads tag → boldFontMask
+        let italic = formatMenu.addItem(withTitle: "Italic",
+                                        action: Selector(("addFontTrait:")),
+                                        keyEquivalent: "i")
+        italic.tag = 1  // italicFontMask
+        formatMenu.addItem(withTitle: "Underline",
+                           action: #selector(NSText.underline(_:)),
+                           keyEquivalent: "u")
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func refreshStatusTitle() {

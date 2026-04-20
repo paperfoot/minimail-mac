@@ -144,6 +144,7 @@ struct ReaderView: View {
             return .handled
         }
         .focusable()
+        .focusEffectDisabled()
     }
 
     @ViewBuilder
