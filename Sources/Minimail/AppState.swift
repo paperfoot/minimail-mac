@@ -101,6 +101,8 @@ final class ReaderState {
     /// IDs of thread messages the user has manually expanded in the reader.
     /// The currently-loaded message is always treated as expanded.
     var expandedThreadIDs: Set<Int64> = []
+    /// Non-nil = delete confirmation dialog is up for this message id.
+    var pendingDeleteConfirm: Int64?
 }
 
 @MainActor
@@ -165,8 +167,6 @@ final class ComposeState {
     var replyAll: Bool = false
     var isSending: Bool = false
     var error: String?
-    /// Non-nil = dialog asking whether to permanently delete the linked message.
-    var pendingDeleteConfirm: Int64?
 
     /// The backing draft row we're editing — created lazily on first autosave,
     /// or populated when the user taps a row in the Drafts folder. On send
@@ -607,6 +607,27 @@ final class AppState {
         }
     }
 
+    /// Mark a single message as read. Wraps the CLI so views don't need to
+    /// know about the transport — they talk to AppState, AppState talks to
+    /// the CLI. Kept alongside markUnread/archive for shape consistency.
+    func markRead(message: Message) async {
+        do {
+            try await cli.markRead(ids: [message.id])
+            await refreshInbox(pull: false)
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    func unarchive(message: Message) async {
+        do {
+            try await cli.unarchive(ids: [message.id])
+            await refreshInbox(pull: false)
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
     func delete(message: Message) async {
         do {
             try await cli.delete(ids: [message.id])
@@ -940,10 +961,7 @@ final class AppState {
     }
 
     private func splitAddresses(_ raw: String) -> [String] {
-        raw
-            .split(whereSeparator: { ",; \n\t".contains($0) })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        raw.splitAddressTokens()
     }
 }
 
@@ -951,5 +969,14 @@ extension String {
     var looksLikeEmail: Bool {
         let pattern = #"^[A-Z0-9a-z._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"#
         return self.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    /// Split a raw address list into individual tokens. Splits on commas /
+    /// semicolons / newlines / tabs — NOT whitespace, so display names like
+    /// "Alice Example <alice@x.com>" survive intact. Trims each result.
+    func splitAddressTokens() -> [String] {
+        self.split(whereSeparator: { ",;\n\t".contains($0) })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 }

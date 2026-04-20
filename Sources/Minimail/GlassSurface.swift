@@ -1,15 +1,10 @@
 import SwiftUI
 
-/// Wraps a view with the macOS 26 Liquid Glass effect, falling back to
-/// `.ultraThinMaterial` on older OS versions. Use this instead of calling
-/// `.glassEffect()` directly so fallbacks stay consistent across the app.
+/// Apply the macOS 26 Liquid Glass effect with a shape default that matches
+/// our other glass surfaces. Deployment target is 26.0 so no fallback is
+/// needed — `glassEffect` is always available.
 extension View {
-    @ViewBuilder
     func glassSurface<S: Shape>(in shape: S = RoundedRectangle(cornerRadius: 12)) -> some View {
-        if #available(macOS 26, *) {
-            self.glassEffect(.regular, in: shape)
-        } else {
-            self.background(.ultraThinMaterial, in: shape)
-        }
+        self.glassEffect(.regular, in: shape)
     }
 }

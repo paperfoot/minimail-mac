@@ -95,13 +95,8 @@ struct RootView: View {
         }
     }
 
-    @ViewBuilder
     private var backgroundLayer: some View {
-        if #available(macOS 26, *) {
-            Color.clear.containerBackground(.thinMaterial, for: .window)
-        } else {
-            Rectangle().fill(.ultraThinMaterial)
-        }
+        Color.clear.containerBackground(.thinMaterial, for: .window)
     }
 }
 
@@ -324,21 +319,10 @@ struct TransientStatusToast: View {
     }
 }
 
-/// Shared glass capsule used by the in-popover toasts. On macOS 26 this is
-/// native Liquid Glass — no custom shadow/border because the system handles
-/// those edge effects itself (per Apple's HIG). Pre-26 falls back to
-/// `.regularMaterial` with a hairline stroke so it doesn't look naked.
+/// Liquid Glass capsule for in-popover toasts. System handles edge effects,
+/// so no custom shadow or stroke border — per Apple's Liquid Glass HIG.
 extension View {
     func glassToastBackground() -> some View {
-        Group {
-            if #available(macOS 26, *) {
-                self.glassEffect(.regular, in: .capsule)
-            } else {
-                self
-                    .background(.regularMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
-            }
-        }
+        self.glassEffect(.regular, in: .capsule)
     }
 }
