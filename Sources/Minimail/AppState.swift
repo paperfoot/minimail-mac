@@ -22,12 +22,15 @@ final class SessionState {
 final class InboxState {
     enum Folder: String, Hashable, CaseIterable {
         case inbox = "Inbox"
+        case starred = "Starred"
+        case snoozed = "Snoozed"
         case sent = "Sent"
         case drafts = "Drafts"
         case archived = "Archived"
     }
 
     var messages: [Message] = []
+    var snoozedMessages: [Message] = []
     var drafts: [Draft] = []
     var currentFolder: Folder = .inbox
     var searchQuery: String = ""
@@ -36,12 +39,22 @@ final class InboxState {
     var syncState: AppState.SyncState = .idle
     var error: String?
     var lastPullAt: Date?
+    /// Multi-select (Shift- or ⌘-click to toggle). Non-empty selection
+    /// surfaces the bulk-action bar at the top of the list.
+    var selection: Set<Int64> = []
 
     func visible() -> [Message] {
         let base: [Message]
         switch currentFolder {
         case .inbox:
-            base = messages.filter { $0.direction == "received" && !$0.isArchived }
+            // Hide currently-snoozed messages from the main inbox.
+            base = messages.filter {
+                $0.direction == "received" && !$0.isArchived && !$0.isSnoozed
+            }
+        case .starred:
+            base = messages.filter { $0.isStarred && !$0.isArchived }
+        case .snoozed:
+            base = snoozedMessages.filter { $0.isSnoozed }
         case .sent:
             base = messages.filter { $0.direction == "sent" }
         case .drafts:
@@ -53,7 +66,8 @@ final class InboxState {
         guard !q.isEmpty else { return base }
         return base.filter { msg in
             (msg.subject ?? "").lowercased().contains(q) ||
-            msg.from_addr.lowercased().contains(q)
+            msg.from_addr.lowercased().contains(q) ||
+            (msg.text_preview ?? "").lowercased().contains(q)
         }
     }
 
@@ -64,6 +78,11 @@ final class InboxState {
             (d.subject ?? "").lowercased().contains(q) ||
             (d.to ?? []).joined(separator: " ").lowercased().contains(q)
         }
+    }
+
+    func clearSelection() { selection.removeAll() }
+    func toggle(_ id: Int64) {
+        if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
     }
 }
 
@@ -162,9 +181,19 @@ struct PendingSend: Sendable {
     let deadline: Date
 }
 
-/// Transient status flash shown briefly after a successful send completes.
+/// Transient status flash shown briefly after a send / archive / delete / etc.
 enum TransientStatus: Equatable {
     case sent
+    /// Messages archived — user can undo within the 10s window. IDs let us
+    /// restore them.
+    case archived(ids: [Int64], deadline: Date)
+    /// Messages deleted — undo within window restores via the `trashed_ids`
+    /// remembered by the delete call (we fake the undo by re-inserting
+    /// nothing and relying on the user to re-sync; for now we just let the
+    /// user know it happened).
+    case deleted(count: Int)
+    /// One-off confirmation banner for miscellaneous actions (star, snooze).
+    case info(String)
 }
 
 @MainActor
@@ -203,6 +232,9 @@ final class AppState {
     /// across stored messages. Rebuilt from `inbox.messages` on each refresh.
     /// Used by EmailTokenField for recipient autocomplete.
     var contactIndex: [String] = []
+
+    /// Last archived IDs, for the "Undo" action on the archive toast.
+    private var lastArchivedIDs: [Int64] = []
 
     private let cli = EmailCLI.shared
 
@@ -275,9 +307,11 @@ final class AppState {
             }
             async let listA = cli.listInbox(account: email, archived: false, limit: 100)
             async let listB = cli.listInbox(account: email, archived: true, limit: 100)
-            let (a, b) = try await (listA, listB)
+            async let snoozedList = cli.listInbox(account: email, snoozed: true, limit: 100)
+            let (a, b, c) = try await (listA, listB, snoozedList)
             var seen = Set<Int64>()
             inbox.messages = (a + b).filter { seen.insert($0.id).inserted }
+            inbox.snoozedMessages = c
             let stats = try? await cli.stats(account: email)
             inbox.totalUnread = stats?.unread ?? inbox.messages.filter(\.isUnread).count
             inbox.error = nil
@@ -369,13 +403,139 @@ final class AppState {
     // ── Message actions ───────────────────────────────────────────────────
 
     func archive(message: Message) async {
+        await archive(ids: [message.id], navigateBack: true)
+    }
+
+    /// Archive any list of messages. Captures the IDs so an Undo toast can
+    /// unarchive within the next 10s. Reusable for single-row archive (from
+    /// reader) and bulk archive (from the selection bar).
+    func archive(ids: [Int64], navigateBack: Bool = false) async {
+        guard !ids.isEmpty else { return }
         do {
-            try await cli.archive(ids: [message.id])
-            router.currentView = .inbox
+            try await cli.archive(ids: ids)
+            lastArchivedIDs = ids
+            if navigateBack, case .reader = router.currentView {
+                router.currentView = .inbox
+            }
+            inbox.clearSelection()
+            await refreshInbox(pull: false)
+            flashStatus(.archived(ids: ids, deadline: Date().addingTimeInterval(Self.undoSendWindow)))
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    /// Undo for the archive toast — fires a one-shot unarchive for the last
+    /// captured IDs.
+    func undoLastArchive() async {
+        guard !lastArchivedIDs.isEmpty else { return }
+        let ids = lastArchivedIDs
+        lastArchivedIDs = []
+        transientStatus = nil
+        do {
+            try await cli.unarchive(ids: ids)
             await refreshInbox(pull: false)
         } catch {
             inbox.error = error.localizedDescription
         }
+    }
+
+    // ── Star / Snooze / Unsubscribe ───────────────────────────────────────
+
+    func toggleStar(_ message: Message) async {
+        do {
+            if message.isStarred {
+                try await cli.unstar(ids: [message.id])
+            } else {
+                try await cli.star(ids: [message.id])
+            }
+            await refreshInbox(pull: false)
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    func snooze(_ message: Message, until: String) async {
+        do {
+            try await cli.snooze(ids: [message.id], until: until)
+            if case .reader = router.currentView { router.currentView = .inbox }
+            await refreshInbox(pull: false)
+            flashStatus(.info("Snoozed"))
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    func unsnooze(_ message: Message) async {
+        do {
+            try await cli.unsnooze(ids: [message.id])
+            await refreshInbox(pull: false)
+            flashStatus(.info("Back in inbox"))
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    /// Resolve a List-Unsubscribe link via the CLI and open it in the browser.
+    /// Returns the URL so the UI can also show it in a confirmation dialog
+    /// before opening.
+    @discardableResult
+    func unsubscribeFrom(_ message: Message) async -> String? {
+        do {
+            let urlString = try await cli.unsubscribeURL(messageID: message.id)
+            if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+            flashStatus(.info("Unsubscribe link opened"))
+            return urlString
+        } catch {
+            inbox.error = error.localizedDescription
+            return nil
+        }
+    }
+
+    // ── Bulk actions ──────────────────────────────────────────────────────
+
+    func bulkArchive() async {
+        let ids = Array(inbox.selection)
+        await archive(ids: ids)
+    }
+
+    func bulkMarkRead() async {
+        let ids = Array(inbox.selection)
+        guard !ids.isEmpty else { return }
+        do {
+            try await cli.markRead(ids: ids)
+            inbox.clearSelection()
+            await refreshInbox(pull: false)
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    func bulkDelete() async {
+        let ids = Array(inbox.selection)
+        guard !ids.isEmpty else { return }
+        do {
+            try await cli.delete(ids: ids)
+            inbox.clearSelection()
+            await refreshInbox(pull: false)
+            flashStatus(.deleted(count: ids.count))
+        } catch {
+            inbox.error = error.localizedDescription
+        }
+    }
+
+    // ── Account quick-switcher ────────────────────────────────────────────
+
+    /// Activate the nth account (1-indexed). Hooked to ⌘1…⌘9 via RootView.
+    /// No-op if there's no account at that index.
+    func selectAccount(at index: Int) async {
+        guard index >= 1, index <= session.accounts.count else { return }
+        let acct = session.accounts[index - 1]
+        session.currentAccount = acct
+        try? await cli.setDefaultAccount(acct.email)
+        await refreshInbox(pull: false)
     }
 
     func markAllRead() async {
@@ -642,8 +802,14 @@ final class AppState {
     private func flashStatus(_ status: TransientStatus) {
         transientStatus = status
         transientClearTask?.cancel()
+        // Archive gets the full undo window; other flashes fade quickly.
+        let lifetime: TimeInterval
+        switch status {
+        case .archived: lifetime = Self.undoSendWindow
+        default: lifetime = 2.5
+        }
         transientClearTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(lifetime))
             if Task.isCancelled { return }
             self?.transientStatus = nil
         }

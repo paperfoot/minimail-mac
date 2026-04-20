@@ -52,6 +52,8 @@ struct ComposeView: View {
                 .background(Color.clear)
                 .onChange(of: state.compose.body) { _, _ in state.scheduleAutosave() }
 
+            signaturePreview
+
             footer
         }
         .onAppear {
@@ -353,6 +355,32 @@ struct ComposeView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+    }
+
+    /// Muted preview of what the current account's signature will add to
+    /// the outgoing message. Nil/empty signature hides the row entirely.
+    @ViewBuilder
+    private var signaturePreview: some View {
+        if let sig = state.session.currentAccount?.signature,
+           !sig.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Divider().opacity(0.1)
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "signature")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Text(sig)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Color.primary.opacity(0.02))
+            }
+        }
     }
 
     private var footer: some View {
