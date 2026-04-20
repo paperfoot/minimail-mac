@@ -90,7 +90,7 @@ struct ReaderView: View {
                     }
                     Divider()
                     Button("Delete…", role: .destructive) {
-                        state.compose.pendingDeleteConfirm = msg.id
+                        state.reader.pendingDeleteConfirm = msg.id
                     }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -109,20 +109,20 @@ struct ReaderView: View {
         .confirmationDialog(
             "Delete this message?",
             isPresented: Binding(
-                get: { state.compose.pendingDeleteConfirm != nil },
-                set: { if !$0 { state.compose.pendingDeleteConfirm = nil } }
+                get: { state.reader.pendingDeleteConfirm != nil },
+                set: { if !$0 { state.reader.pendingDeleteConfirm = nil } }
             ),
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                if let id = state.compose.pendingDeleteConfirm,
+                if let id = state.reader.pendingDeleteConfirm,
                    let msg = state.reader.loaded, msg.id == id {
                     Task { await state.delete(message: msg) }
                 }
-                state.compose.pendingDeleteConfirm = nil
+                state.reader.pendingDeleteConfirm = nil
             }
             Button("Cancel", role: .cancel) {
-                state.compose.pendingDeleteConfirm = nil
+                state.reader.pendingDeleteConfirm = nil
             }
         } message: {
             Text("You can't undo this. Archive keeps it out of the inbox instead.")

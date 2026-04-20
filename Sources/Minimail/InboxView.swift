@@ -52,7 +52,7 @@ struct InboxView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(Color.primary.opacity(0.06), in: Capsule())
+                .glassEffect(.regular, in: .capsule)
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -218,7 +218,8 @@ struct InboxView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color.accentColor.opacity(0.08))
+        .glassEffect(.regular.tint(Color.accentColor.opacity(0.15)),
+                     in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var draftsList: some View {
@@ -254,7 +255,7 @@ struct InboxView: View {
                     } else {
                         ForEach(groups, id: \.label) { group in
                             Section {
-                                ForEach(Array(group.messages.enumerated()), id: \.element.id) { localIdx, msg in
+                                ForEach(group.messages) { msg in
                                     let globalIdx = DayGrouping.globalIndex(of: msg, in: groups)
                                     MessageRow(
                                         message: msg,
@@ -271,7 +272,6 @@ struct InboxView: View {
                                             state.inbox.focusedRowIndex = globalIdx
                                             state.open(message: msg)
                                         }
-                                        _ = localIdx
                                     }
                                     .contextMenu {
                                         messageContextMenu(for: msg)
@@ -334,12 +334,12 @@ struct InboxView: View {
         }
         Divider()
         if msg.isUnread {
-            Button("Mark as Read") { Task { try? await EmailCLI.shared.markRead(ids: [msg.id]); await state.refreshInbox(pull: false) } }
+            Button("Mark as Read") { Task { await state.markRead(message: msg) } }
         } else if msg.direction == "received" {
             Button("Mark as Unread") { Task { await state.markUnread(message: msg) } }
         }
         if msg.isArchived {
-            Button("Move to Inbox") { Task { try? await EmailCLI.shared.unarchive(ids: [msg.id]); await state.refreshInbox(pull: false) } }
+            Button("Move to Inbox") { Task { await state.unarchive(message: msg) } }
         } else {
             Button("Archive") { Task { await state.archive(message: msg) } }
         }
@@ -649,14 +649,20 @@ enum DayGrouping {
     }
 }
 
-@MainActor
-enum DateFormat {
-    private static let iso: ISO8601DateFormatter = {
+/// Thread-safe timestamp parser shared by every caller (Models.Message,
+/// DateFormat, etc.). Uses three formats in priority order: ISO-8601 with
+/// fractional seconds, plain ISO-8601, and SQLite `yyyy-MM-dd HH:mm:ss` (UTC).
+/// Non-isolated so it's callable from Decodable init paths off the main actor.
+enum Dates {
+    // ISO8601DateFormatter is not Sendable (yet); DateFormatter is. For the
+    // ISO variants we opt out of concurrency checking — they're functionally
+    // immutable once configured and we only read from them.
+    nonisolated(unsafe) private static let iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
-    private static let isoNoFrac: ISO8601DateFormatter = {
+    nonisolated(unsafe) private static let isoNoFrac: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
         return f
@@ -668,6 +674,18 @@ enum DateFormat {
         f.timeZone = TimeZone(identifier: "UTC")
         return f
     }()
+
+    static func parse(_ raw: String?) -> Date? {
+        guard let raw else { return nil }
+        if let d = iso.date(from: raw) { return d }
+        if let d = isoNoFrac.date(from: raw) { return d }
+        if let d = sqlite.date(from: raw) { return d }
+        return nil
+    }
+}
+
+@MainActor
+enum DateFormat {
     private static let timeOnly: DateFormatter = {
         let f = DateFormatter(); f.locale = .current; f.dateFormat = "h:mm a"; return f
     }()
@@ -685,11 +703,7 @@ enum DateFormat {
     }()
 
     static func parse(_ raw: String?) -> Date? {
-        guard let raw else { return nil }
-        if let d = iso.date(from: raw) { return d }
-        if let d = isoNoFrac.date(from: raw) { return d }
-        if let d = sqlite.date(from: raw) { return d }
-        return nil
+        Dates.parse(raw)
     }
 
     static func inboxList(_ raw: String?) -> String {

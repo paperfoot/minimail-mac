@@ -62,27 +62,7 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
         guard let wake = snoozeDate else { return false }
         return wake > Date()
     }
-    var snoozeDate: Date? {
-        guard let raw = snoozed_until else { return nil }
-        return Message.parseISO(raw)
-    }
-
-    /// Non-isolated ISO-8601 parser mirroring DateFormat.parse so computed
-    /// properties on Message can run off the main actor (e.g. inside
-    /// `.filter` closures on background tasks).
-    private static func parseISO(_ raw: String) -> Date? {
-        let f1 = ISO8601DateFormatter()
-        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f1.date(from: raw) { return d }
-        let f2 = ISO8601DateFormatter()
-        f2.formatOptions = [.withInternetDateTime]
-        if let d = f2.date(from: raw) { return d }
-        let f3 = DateFormatter()
-        f3.locale = Locale(identifier: "en_US_POSIX")
-        f3.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        f3.timeZone = TimeZone(identifier: "UTC")
-        return f3.date(from: raw)
-    }
+    var snoozeDate: Date? { Dates.parse(snoozed_until) }
     var hasUnsubscribeLink: Bool {
         guard let s = list_unsubscribe else { return false }
         return !s.isEmpty

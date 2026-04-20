@@ -167,10 +167,7 @@ struct EmailTokenField: View {
     }
 
     static func split(_ string: String) -> [String] {
-        string
-            .split(whereSeparator: { ",;\n\t".contains($0) })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        string.splitAddressTokens()
     }
 }
 
@@ -252,26 +249,9 @@ private struct SuggestionPopover: View {
         }
         .padding(4)
         .frame(minWidth: 220, idealWidth: 280, maxWidth: 320)
-        .modifier(GlassPopoverBackground())
-    }
-}
-
-/// Liquid Glass surface for floating popovers. Per Apple's guidance, we don't
-/// add any shadow or border — the system renders edge lighting automatically.
-/// Pre-macOS-26 fallback uses regularMaterial with a hairline stroke.
-private struct GlassPopoverBackground: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 26, *) {
-            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        } else {
-            content
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
-                )
-                .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
-        }
+        // 12pt matches our other glass surfaces (GlassSurface.glassSurface).
+        // System handles edge effects — no custom shadow or border.
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
