@@ -45,6 +45,20 @@ struct ModelDecodingTests {
         #expect(env.data?.total == 83)
     }
 
+    @Test("v0.7.0 fields (starred, snoozed_until, list_unsubscribe, text_preview, has_attachments) decode")
+    func inboxListV07Fields() throws {
+        let env = try decoder.decode(
+            Envelope<InboxListResponse>.self,
+            from: Data(Fixtures.inboxListV07.utf8)
+        )
+        let m = try #require(env.data?.messages?.first)
+        #expect(m.starred == true)
+        #expect(m.snoozed_until == "2026-04-21T08:00:00Z")
+        #expect(m.has_attachments == true)
+        #expect(m.text_preview?.hasPrefix("Short two-line") == true)
+        #expect(m.list_unsubscribe?.contains("unsubscribe.example") == true)
+    }
+
     @Test("message detail decodes with all optional fields")
     func messageDetail() throws {
         let env = try decoder.decode(
@@ -76,7 +90,9 @@ struct ModelDecodingTests {
             from_addr: "sender@example.com", to: nil, cc: nil, bcc: nil, reply_to: nil,
             subject: nil, text_body: nil, html_body: nil, rfc_message_id: nil,
             in_reply_to: nil, references: nil, last_event: nil, is_read: nil,
-            created_at: nil, synced_at: nil, archived: nil
+            created_at: nil, synced_at: nil, archived: nil,
+            text_preview: nil, starred: nil, snoozed_until: nil,
+            list_unsubscribe: nil, has_attachments: nil
         )
         #expect(msg.fromParts.name == nil)
         #expect(msg.fromParts.email == "sender@example.com")
