@@ -110,7 +110,55 @@ final class ComposeState {
     var cc: String = ""
     var bcc: String = ""
     var subject: String = ""
-    var body: String = ""
+    /// Rich-text backing store for the body editor. Plain-text getters below
+    /// read through `.string` for autosave / contact parsing; `bodyHTML`
+    /// turns it into sendable HTML at send time.
+    var bodyAttributed: NSAttributedString = NSAttributedString()
+    /// Plain-text passthrough. Writing replaces the attributed string with a
+    /// plain run so callers that only deal in strings (Forward / Reply
+    /// seeding) still work.
+    var body: String {
+        get { bodyAttributed.string }
+        set {
+            bodyAttributed = NSAttributedString(string: newValue, attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.labelColor,
+            ])
+        }
+    }
+    /// HTML serialization of the attributed body. Nil when the body has no
+    /// formatting beyond the default run (so the CLI sends text only).
+    var bodyHTML: String? {
+        guard bodyAttributed.length > 0, bodyContainsFormatting else { return nil }
+        let range = NSRange(location: 0, length: bodyAttributed.length)
+        let attrs: [NSAttributedString.DocumentAttributeKey: Any] = [
+            .documentType: NSAttributedString.DocumentType.html,
+            .characterEncoding: String.Encoding.utf8.rawValue,
+        ]
+        guard let data = try? bodyAttributed.data(from: range, documentAttributes: attrs),
+              let html = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return html
+    }
+    /// True when at least one run has bold / italic / underline / link /
+    /// non-default colour — worth emitting HTML for. Avoids wrapping pure
+    /// plain-text messages in gnarly HTML boilerplate.
+    private var bodyContainsFormatting: Bool {
+        var found = false
+        let full = NSRange(location: 0, length: bodyAttributed.length)
+        bodyAttributed.enumerateAttributes(in: full, options: []) { attrs, _, stop in
+            if attrs[.link] != nil { found = true; stop.pointee = true; return }
+            if attrs[.underlineStyle] != nil { found = true; stop.pointee = true; return }
+            if let font = attrs[.font] as? NSFont {
+                let traits = NSFontManager.shared.traits(of: font)
+                if traits.contains(.boldFontMask) || traits.contains(.italicFontMask) {
+                    found = true; stop.pointee = true; return
+                }
+            }
+        }
+        return found
+    }
     var attachments: [URL] = []
     var replyToID: Int64?
     var forwardingID: Int64?
@@ -132,7 +180,8 @@ final class ComposeState {
     func clear() {
         autosaveTask?.cancel()
         autosaveTask = nil
-        to = ""; cc = ""; bcc = ""; subject = ""; body = ""
+        to = ""; cc = ""; bcc = ""; subject = ""
+        bodyAttributed = NSAttributedString()
         attachments = []
         replyToID = nil; forwardingID = nil; replyAll = false; error = nil
         editingDraftID = nil; lastAutosaveAt = nil
@@ -597,7 +646,22 @@ final class AppState {
         compose.cc = (draft.cc ?? []).joined(separator: ", ")
         compose.bcc = (draft.bcc ?? []).joined(separator: ", ")
         compose.subject = draft.subject ?? ""
-        compose.body = draft.text_body ?? ""
+        // Prefer HTML body if the draft has one so rich-text formatting
+        // survives a save-and-reopen round-trip. Falls back to plain text.
+        if let html = draft.html_body, !html.isEmpty,
+           let data = html.data(using: .utf8),
+           let attr = try? NSAttributedString(
+               data: data,
+               options: [
+                   .documentType: NSAttributedString.DocumentType.html,
+                   .characterEncoding: String.Encoding.utf8.rawValue,
+               ],
+               documentAttributes: nil
+           ) {
+            compose.bodyAttributed = attr
+        } else {
+            compose.body = draft.text_body ?? ""
+        }
         compose.replyToID = draft.reply_to_message_id
         router.currentView = .compose(nil)
     }
@@ -628,18 +692,19 @@ final class AppState {
         let bccList = splitAddresses(compose.bcc)
         let subject = compose.subject
         let body = compose.body.isEmpty ? nil : compose.body
+        let html = compose.bodyHTML
 
         do {
             if let id = compose.editingDraftID {
                 try await cli.editDraft(
                     id: id, to: toList, cc: ccList, bcc: bccList,
-                    subject: subject, text: body
+                    subject: subject, text: body, html: html
                 )
             } else {
                 let draft = try await cli.createDraft(
                     account: session.currentAccount?.email,
                     to: toList, cc: ccList, bcc: bccList,
-                    subject: subject, text: body,
+                    subject: subject, text: body, html: html,
                     replyToMessageID: compose.replyToID
                 )
                 compose.editingDraftID = draft.id
@@ -710,14 +775,16 @@ final class AppState {
         }
 
         let now = Date()
+        let plainText = compose.body.isEmpty ? nil : compose.body
+        let html = compose.bodyHTML
         let snapshot = PendingSend(
             from: session.currentAccount?.email,
             to: to,
             cc: cc,
             bcc: bcc,
             subject: compose.subject,
-            text: compose.body.isEmpty ? nil : compose.body,
-            html: nil,
+            text: plainText,
+            html: html,
             attachments: compose.attachments,
             replyToMessageID: compose.replyToID,
             originalDraftID: compose.editingDraftID,

@@ -56,6 +56,7 @@ struct InboxView: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
+            .help("Switch account (⌘1…⌘9)")
 
             Spacer()
 
@@ -515,10 +516,11 @@ struct MessageRow: View {
                 }
             }
 
-            if hovered {
-                hoverActions
-                    .transition(.opacity)
-            }
+            // Always reserved so showing / hiding doesn't reflow the row.
+            // Gmail / Apple Mail use the same trick.
+            hoverActions
+                .opacity(hovered ? 1 : 0)
+                .allowsHitTesting(hovered)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

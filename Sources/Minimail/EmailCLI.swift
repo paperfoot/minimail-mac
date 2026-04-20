@@ -268,11 +268,13 @@ actor EmailCLI {
         cc: [String]?,
         bcc: [String]?,
         subject: String?,
-        text: String?
+        text: String?,
+        html: String? = nil
     ) async throws {
         var args = ["draft", "edit", id, "--json"]
         if let subject { args += ["--subject", subject] }
         if let text { args += ["--text", text] }
+        if let html { args += ["--html", html] }
         if let to { for t in to { args += ["--to", t] } }
         if let cc { for c in cc { args += ["--cc", c] } }
         if let bcc { for b in bcc { args += ["--bcc", b] } }
