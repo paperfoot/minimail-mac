@@ -58,9 +58,34 @@ struct ReaderView: View {
                 .help("Archive (⌘⌫)")
                 .keyboardShortcut(.delete, modifiers: .command)
 
+                Button {
+                    Task { await state.toggleStar(msg) }
+                } label: {
+                    Image(systemName: msg.isStarred ? "star.fill" : "star")
+                        .foregroundStyle(msg.isStarred ? .yellow : .secondary)
+                }
+                .buttonStyle(IconButtonStyle())
+                .help(msg.isStarred ? "Unstar" : "Star (S)")
+                .keyboardShortcut("s", modifiers: [])
+
                 Menu {
+                    Button("Later today (4h)") { Task { await state.snooze(msg, until: "4h") } }
+                    Button("Tonight") { Task { await state.snooze(msg, until: "tonight") } }
+                    Button("Tomorrow") { Task { await state.snooze(msg, until: "tomorrow") } }
+                    Button("Next week") { Task { await state.snooze(msg, until: "next-week") } }
+                    if msg.isSnoozed {
+                        Divider()
+                        Button("Unsnooze") { Task { await state.unsnooze(msg) } }
+                    }
+                    Divider()
                     Button("Mark as Unread") {
                         Task { await state.markUnread(message: msg) }
+                    }
+                    if msg.hasUnsubscribeLink {
+                        Divider()
+                        Button("Unsubscribe…") {
+                            Task { await state.unsubscribeFrom(msg) }
+                        }
                     }
                     Divider()
                     Button("Delete…", role: .destructive) {
@@ -125,6 +150,10 @@ struct ReaderView: View {
         if let msg = state.reader.loaded {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if msg.hasUnsubscribeLink {
+                        unsubscribeRibbon(msg)
+                        Divider().opacity(0.2)
+                    }
                     if state.reader.thread.count > 1 {
                         threadStack(focusedID: msg.id)
                     } else {
@@ -149,6 +178,26 @@ struct ReaderView: View {
         } else {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func unsubscribeRibbon(_ msg: Message) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "envelope.arrow.triangle.branch")
+                .font(.system(size: 11))
+                .foregroundStyle(Color.accentColor)
+            Text("Mailing-list mail — one click to unsubscribe")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Unsubscribe") {
+                Task { await state.unsubscribeFrom(msg) }
+            }
+            .controlSize(.small)
+            .buttonStyle(.bordered)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.06))
     }
 
     @ViewBuilder
@@ -317,13 +366,26 @@ struct ReaderView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 8) {
             if let msg = state.reader.loaded {
                 Button { state.startCompose(replyTo: msg) } label: {
                     Label("Reply", systemImage: "arrowshape.turn.up.left")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+            }
+            if let msg = state.reader.loaded,
+               let html = msg.html_body,
+               let count = Self.trackingPixelCount(in: html),
+               count > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "shield.lefthalf.filled")
+                        .font(.system(size: 9))
+                    Text("Blocked \(count) tracker\(count == 1 ? "" : "s")")
+                        .font(.system(size: 10))
+                }
+                .foregroundStyle(.tertiary)
+                .help("Remote images blocked to prevent read tracking")
             }
             Spacer()
             // Message position indicator — "3 of 24" style
@@ -338,5 +400,16 @@ struct ReaderView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    /// Count of `<img src="http...">` elements — a proxy for tracking-pixel
+    /// density since those are exactly the images our WKContentRuleList
+    /// blocks. Bounded at a simple regex match; good enough for a badge.
+    private static func trackingPixelCount(in html: String) -> Int? {
+        let pattern = "<img[^>]+src=\"https?://"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        return regex.numberOfMatches(in: html, range: NSRange(html.startIndex..., in: html))
     }
 }

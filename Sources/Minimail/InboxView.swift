@@ -22,6 +22,17 @@ struct InboxView: View {
             messageList
             footer
         }
+        .onAppear {
+            // Land the keyboard selection on the first unread message when
+            // the inbox first appears — saves the user pressing j to get to
+            // what they actually want to read.
+            if state.inbox.focusedRowIndex < 0 {
+                let visible = state.inbox.visible()
+                if let idx = visible.firstIndex(where: { $0.isUnread }) {
+                    state.inbox.focusedRowIndex = idx
+                }
+            }
+        }
     }
 
     private func header(session: SessionState) -> some View {
@@ -73,30 +84,40 @@ struct InboxView: View {
     }
 
     private func folderRow(inbox: InboxState) -> some View {
-        HStack(spacing: 2) {
-            ForEach(InboxState.Folder.allCases, id: \.self) { folder in
-                FolderTab(
-                    title: folder.rawValue,
-                    count: badge(for: folder, inbox: inbox),
-                    selected: inbox.currentFolder == folder
-                ) {
-                    inbox.currentFolder = folder
-                    inbox.focusedRowIndex = -1
-                    if folder == .drafts {
-                        Task { await state.refreshDrafts() }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(InboxState.Folder.allCases, id: \.self) { folder in
+                    FolderTab(
+                        title: folder.rawValue,
+                        count: badge(for: folder, inbox: inbox),
+                        selected: inbox.currentFolder == folder
+                    ) {
+                        inbox.currentFolder = folder
+                        inbox.focusedRowIndex = -1
+                        inbox.clearSelection()
+                        if folder == .drafts {
+                            Task { await state.refreshDrafts() }
+                        }
                     }
                 }
             }
-            Spacer()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
     }
 
     private func badge(for folder: InboxState.Folder, inbox: InboxState) -> Int? {
         switch folder {
         case .inbox:
-            let n = inbox.messages.filter { $0.direction == "received" && !$0.isArchived && $0.isUnread }.count
+            let n = inbox.messages.filter {
+                $0.direction == "received" && !$0.isArchived && !$0.isSnoozed && $0.isUnread
+            }.count
+            return n > 0 ? n : nil
+        case .starred:
+            let n = inbox.messages.filter { $0.isStarred && !$0.isArchived }.count
+            return n > 0 ? n : nil
+        case .snoozed:
+            let n = inbox.snoozedMessages.count
             return n > 0 ? n : nil
         case .drafts:
             let n = inbox.drafts.count
@@ -144,11 +165,59 @@ struct InboxView: View {
 
     @ViewBuilder
     private var messageList: some View {
+        if !state.inbox.selection.isEmpty {
+            selectionBar
+            Divider().opacity(0.2)
+        }
         if state.inbox.currentFolder == .drafts {
             draftsList
         } else {
             regularList
         }
+    }
+
+    private var selectionBar: some View {
+        HStack(spacing: 10) {
+            Text("\(state.inbox.selection.count) selected")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer()
+            Button {
+                Task { await state.bulkArchive() }
+            } label: {
+                Label("Archive", systemImage: "archivebox")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            Button {
+                Task { await state.bulkMarkRead() }
+            } label: {
+                Label("Mark Read", systemImage: "envelope.open")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            Button(role: .destructive) {
+                Task { await state.bulkDelete() }
+            } label: {
+                Label("Delete", systemImage: "trash")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.red)
+            Button {
+                state.inbox.clearSelection()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.08))
     }
 
     private var draftsList: some View {
@@ -175,28 +244,42 @@ struct InboxView: View {
 
     private var regularList: some View {
         let visible = state.inbox.visible()
+        let groups = DayGrouping.group(visible)
         return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 0) {
+                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                     if visible.isEmpty, state.inbox.syncState != .syncing {
                         emptyState
                     } else {
-                        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, msg in
-                            MessageRow(
-                                message: msg,
-                                isSelected: state.reader.loaded?.id == msg.id,
-                                isFocused: idx == state.inbox.focusedRowIndex
-                            )
-                            .id(msg.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                state.inbox.focusedRowIndex = idx
-                                state.open(message: msg)
+                        ForEach(groups, id: \.label) { group in
+                            Section {
+                                ForEach(Array(group.messages.enumerated()), id: \.element.id) { localIdx, msg in
+                                    let globalIdx = DayGrouping.globalIndex(of: msg, in: groups)
+                                    MessageRow(
+                                        message: msg,
+                                        isSelected: state.reader.loaded?.id == msg.id,
+                                        isFocused: globalIdx == state.inbox.focusedRowIndex,
+                                        isChecked: state.inbox.selection.contains(msg.id)
+                                    )
+                                    .id(msg.id)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        if !state.inbox.selection.isEmpty {
+                                            state.inbox.toggle(msg.id)
+                                        } else {
+                                            state.inbox.focusedRowIndex = globalIdx
+                                            state.open(message: msg)
+                                        }
+                                        _ = localIdx
+                                    }
+                                    .contextMenu {
+                                        messageContextMenu(for: msg)
+                                    }
+                                    Divider().opacity(0.15)
+                                }
+                            } header: {
+                                DayHeader(label: group.label)
                             }
-                            .contextMenu {
-                                messageContextMenu(for: msg)
-                            }
-                            Divider().opacity(0.15)
                         }
                     }
                 }
@@ -233,6 +316,22 @@ struct InboxView: View {
             state.startForward(of: msg)
         }
         Divider()
+        Button(msg.isStarred ? "Unstar" : "Star") {
+            Task { await state.toggleStar(msg) }
+        }
+        Menu("Snooze") {
+            Button("Later today (4h)") { Task { await state.snooze(msg, until: "4h") } }
+            Button("Tonight") { Task { await state.snooze(msg, until: "tonight") } }
+            Button("Tomorrow") { Task { await state.snooze(msg, until: "tomorrow") } }
+            Button("Next week") { Task { await state.snooze(msg, until: "next-week") } }
+        }
+        if msg.isSnoozed {
+            Button("Unsnooze") { Task { await state.unsnooze(msg) } }
+        }
+        if msg.hasUnsubscribeLink {
+            Button("Unsubscribe…") { Task { await state.unsubscribeFrom(msg) } }
+        }
+        Divider()
         if msg.isUnread {
             Button("Mark as Read") { Task { try? await EmailCLI.shared.markRead(ids: [msg.id]); await state.refreshInbox(pull: false) } }
         } else if msg.direction == "received" {
@@ -242,6 +341,10 @@ struct InboxView: View {
             Button("Move to Inbox") { Task { try? await EmailCLI.shared.unarchive(ids: [msg.id]); await state.refreshInbox(pull: false) } }
         } else {
             Button("Archive") { Task { await state.archive(message: msg) } }
+        }
+        Divider()
+        Button(state.inbox.selection.contains(msg.id) ? "Deselect" : "Add to Selection") {
+            state.inbox.toggle(msg.id)
         }
         Divider()
         Button("Delete", role: .destructive) {
@@ -279,6 +382,8 @@ struct InboxView: View {
     private var emptyIcon: String {
         switch state.inbox.currentFolder {
         case .inbox: return "tray"
+        case .starred: return "star"
+        case .snoozed: return "alarm"
         case .sent: return "paperplane"
         case .drafts: return "doc"
         case .archived: return "archivebox"
@@ -291,6 +396,8 @@ struct InboxView: View {
         }
         switch state.inbox.currentFolder {
         case .inbox: return "Inbox is empty"
+        case .starred: return "No starred messages"
+        case .snoozed: return "Nothing snoozed"
         case .sent: return "Nothing sent yet"
         case .drafts: return "No drafts"
         case .archived: return "No archived messages"
@@ -363,28 +470,34 @@ struct FolderTab: View {
 }
 
 struct MessageRow: View {
+    @Environment(AppState.self) private var state
     let message: Message
     var isSelected: Bool = false
     var isFocused: Bool = false
+    var isChecked: Bool = false
     @State private var hovered = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            // Unread indicator — always reserves 8pt so read/unread rows align.
-            Group {
-                if message.isUnread {
-                    Circle().fill(Color.accentColor).frame(width: 8, height: 8)
-                } else {
-                    Color.clear.frame(width: 8, height: 8)
-                }
-            }
-            .padding(.top, 6)
+            // Leading gutter — unread dot OR checkbox on hover/select.
+            leadingGutter
+                .padding(.top, 6)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
+                    if message.isStarred {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.yellow)
+                    }
                     Text(message.fromParts.name ?? message.fromParts.email)
                         .font(.system(size: 13, weight: message.isUnread ? .semibold : .regular))
                         .lineLimit(1)
+                    if message.has_attachments == true {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
                     Spacer(minLength: 4)
                     Text(DateFormat.inboxList(message.created_at))
                         .font(.system(size: 11))
@@ -401,6 +514,11 @@ struct MessageRow: View {
                         .lineLimit(1)
                 }
             }
+
+            if hovered {
+                hoverActions
+                    .transition(.opacity)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -409,8 +527,59 @@ struct MessageRow: View {
     }
 
     @ViewBuilder
+    private var leadingGutter: some View {
+        if isChecked {
+            Button { state.inbox.toggle(message.id) } label: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+                    .font(.system(size: 14))
+            }
+            .buttonStyle(.plain)
+            .frame(width: 14, height: 14)
+        } else if hovered || !state.inbox.selection.isEmpty {
+            Button { state.inbox.toggle(message.id) } label: {
+                Image(systemName: "circle")
+                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 14))
+            }
+            .buttonStyle(.plain)
+            .frame(width: 14, height: 14)
+        } else if message.isUnread {
+            Circle().fill(Color.accentColor).frame(width: 8, height: 8)
+                .frame(width: 14, height: 14)
+        } else {
+            Color.clear.frame(width: 14, height: 14)
+        }
+    }
+
+    private var hoverActions: some View {
+        HStack(spacing: 4) {
+            Button {
+                Task { await state.toggleStar(message) }
+            } label: {
+                Image(systemName: message.isStarred ? "star.fill" : "star")
+                    .foregroundStyle(message.isStarred ? AnyShapeStyle(Color.yellow) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
+            }
+            .buttonStyle(.plain)
+            .help(message.isStarred ? "Unstar" : "Star")
+
+            Button {
+                Task { await state.archive(ids: [message.id]) }
+            } label: {
+                Image(systemName: "archivebox")
+                    .foregroundStyle(HierarchicalShapeStyle.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Archive")
+        }
+        .font(.system(size: 12))
+    }
+
+    @ViewBuilder
     private var rowBackground: some View {
-        if isFocused {
+        if isChecked {
+            Color.accentColor.opacity(0.1)
+        } else if isFocused {
             Color.accentColor.opacity(0.18)
         } else if isSelected {
             Color.accentColor.opacity(0.14)
@@ -419,6 +588,62 @@ struct MessageRow: View {
         } else {
             Color.clear
         }
+    }
+}
+
+/// Day-group header rendered as a sticky section header inside the inbox list.
+struct DayHeader: View {
+    let label: String
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial)
+    }
+}
+
+/// Groups chronological messages into human-friendly buckets (Today,
+/// Yesterday, This week, Earlier). Used by the inbox list to produce sticky
+/// section headers. `globalIndex` recomputes the flat position across all
+/// groups so keyboard j/k still traverses every row linearly.
+@MainActor
+enum DayGrouping {
+    struct Group { let label: String; let messages: [Message] }
+
+    static func group(_ messages: [Message]) -> [Group] {
+        let cal = Calendar.current
+        let now = Date()
+        let weekStart = cal.date(byAdding: .day, value: -7, to: now) ?? now
+        var buckets: [(String, [Message])] = [
+            ("Today", []), ("Yesterday", []), ("This Week", []), ("Earlier", []),
+        ]
+        for m in messages {
+            guard let d = DateFormat.parse(m.created_at) else {
+                buckets[3].1.append(m); continue
+            }
+            if cal.isDateInToday(d) { buckets[0].1.append(m) }
+            else if cal.isDateInYesterday(d) { buckets[1].1.append(m) }
+            else if d > weekStart { buckets[2].1.append(m) }
+            else { buckets[3].1.append(m) }
+        }
+        return buckets.compactMap { b in b.1.isEmpty ? nil : Group(label: b.0, messages: b.1) }
+    }
+
+    static func globalIndex(of message: Message, in groups: [Group]) -> Int {
+        var idx = 0
+        for g in groups {
+            for m in g.messages {
+                if m.id == message.id { return idx }
+                idx += 1
+            }
+        }
+        return -1
     }
 }
 

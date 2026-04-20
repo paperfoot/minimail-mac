@@ -4,6 +4,17 @@ import AppKit
 /// Keys used for persisted settings. UserDefaults + @AppStorage binds cleanly.
 enum SettingsKey {
     static let syncIntervalSeconds = "minimail.syncIntervalSeconds"
+    /// Per-account mute flag (bool) keyed `minimail.mute.<email>`.
+    static func muteKey(for email: String) -> String {
+        "minimail.mute.\(email)"
+    }
+}
+
+extension MinimailNotifier {
+    /// Returns true when Settings → Notifications has muted this account.
+    static func isMuted(_ email: String) -> Bool {
+        UserDefaults.standard.bool(forKey: SettingsKey.muteKey(for: email))
+    }
 }
 
 struct SettingsView: View {
@@ -204,11 +215,14 @@ struct SettingsView: View {
     private var notificationsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle("Notifications", subtitle: "macOS banner alerts for new incoming mail")
+            ForEach(state.session.accounts) { acct in
+                AccountMuteToggle(email: acct.email)
+            }
             HStack {
                 Image(systemName: "bell.badge")
                     .foregroundStyle(.tertiary)
                 Text("Manage permissions in System Settings")
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Open") {
@@ -218,6 +232,7 @@ struct SettingsView: View {
                 }
                 .controlSize(.small)
             }
+            .padding(.top, 4)
         }
     }
 
@@ -300,4 +315,43 @@ struct AccountSettingRow: View {
 
 extension Notification.Name {
     static let minimailSyncIntervalChanged = Notification.Name("ai.paperfoot.minimail.syncIntervalChanged")
+}
+
+/// Per-account notification toggle row. Reads/writes a boolean keyed by the
+/// account address so the notifier can pick it up via `MinimailNotifier.isMuted`.
+/// UI polarity is "Notifications: ON/OFF" — persisted as `muted` (inverted).
+struct AccountMuteToggle: View {
+    let email: String
+    @State private var muted: Bool
+
+    init(email: String) {
+        self.email = email
+        self._muted = State(initialValue:
+            UserDefaults.standard.bool(forKey: SettingsKey.muteKey(for: email))
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            AccountAvatar(email: email)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(email).font(.system(size: 12))
+                Text(muted ? "Muted" : "Notify on new mail")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { !muted },
+                set: { newVal in
+                    muted = !newVal
+                    UserDefaults.standard.set(muted, forKey: SettingsKey.muteKey(for: email))
+                }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .labelsHidden()
+        }
+        .padding(.vertical, 2)
+    }
 }

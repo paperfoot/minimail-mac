@@ -87,11 +87,31 @@ actor EmailCLI {
         try await runJSON(args: ["account", "list", "--json"], as: [Account].self)
     }
 
-    func listInbox(account: String?, archived: Bool = false, limit: Int = 50) async throws -> [Message] {
+    /// Create a profile (Resend API key container) via the CLI.
+    func addProfile(name: String, apiKey: String) async throws {
+        let args = ["profile", "add", name, "--api-key", apiKey, "--json"]
+        _ = try await runRaw(args: args)
+    }
+
+    /// Register a mailbox (email + profile) with optional default flag.
+    func addAccount(email: String, profile: String, makeDefault: Bool = false) async throws {
+        var args = ["account", "add", email, "--profile", profile, "--json"]
+        if makeDefault { args += ["--default"] }
+        _ = try await runRaw(args: args)
+    }
+
+    func listInbox(
+        account: String?,
+        archived: Bool = false,
+        starred: Bool = false,
+        snoozed: Bool = false,
+        limit: Int = 50
+    ) async throws -> [Message] {
         var args = ["inbox", "list", "--json", "--limit", String(limit)]
         if let account { args += ["--account", account] }
         if archived { args += ["--archived"] }
-        // email-cli's inbox list always returns the paginated envelope.
+        if starred { args += ["--starred"] }
+        if snoozed { args += ["--snoozed"] }
         let resp = try await runJSON(args: args, as: InboxListResponse.self)
         return resp.messages ?? []
     }
@@ -281,6 +301,65 @@ actor EmailCLI {
         var args = ["sync", "--json"]
         if let account { args += ["--account", account] }
         _ = try await runRaw(args: args)
+    }
+
+    func star(ids: [Int64]) async throws {
+        var args = ["inbox", "star"]; args += ids.map(String.init)
+        _ = try await runRaw(args: args + ["--json"])
+    }
+
+    func unstar(ids: [Int64]) async throws {
+        var args = ["inbox", "unstar"]; args += ids.map(String.init)
+        _ = try await runRaw(args: args + ["--json"])
+    }
+
+    /// Snooze one or more messages until the given wake time. `until` accepts
+    /// the CLI's keyword grammar ("tomorrow", "4h", "next-week") or an ISO
+    /// timestamp — documented in `email-cli inbox snooze --help`.
+    func snooze(ids: [Int64], until: String) async throws {
+        var args = ["inbox", "snooze"]; args += ids.map(String.init)
+        args += ["--until", until, "--json"]
+        _ = try await runRaw(args: args)
+    }
+
+    func unsnooze(ids: [Int64]) async throws {
+        var args = ["inbox", "unsnooze"]; args += ids.map(String.init)
+        _ = try await runRaw(args: args + ["--json"])
+    }
+
+    /// Resolve the List-Unsubscribe header on a message into a URL (or
+    /// mailto:) the UI can open in the user's browser.
+    func unsubscribeURL(messageID: Int64) async throws -> String {
+        let raw = try await runRaw(args: ["inbox", "unsubscribe", String(messageID), "--json"])
+        let env = try JSONDecoder().decode(Envelope<UnsubscribeResponse>.self, from: raw)
+        guard let payload = env.data else {
+            throw CLIError.envelopeError("no unsubscribe link on message \(messageID)")
+        }
+        return payload.url
+    }
+
+    /// Gmail-style search with optional filters. `query` is the free-text
+    /// part; the rest map to named flags on `inbox search`.
+    func search(
+        query: String,
+        account: String?,
+        from: String? = nil,
+        to: String? = nil,
+        subject: String? = nil,
+        hasAttachment: Bool = false,
+        unread: Bool = false,
+        starred: Bool = false,
+        limit: Int = 50
+    ) async throws -> [Message] {
+        var args = ["inbox", "search", query, "--json", "--limit", String(limit)]
+        if let account { args += ["--account", account] }
+        if let from { args += ["--from", from] }
+        if let to { args += ["--to", to] }
+        if let subject { args += ["--subject", subject] }
+        if hasAttachment { args += ["--has-attachment"] }
+        if unread { args += ["--unread"] }
+        if starred { args += ["--starred"] }
+        return try await runJSON(args: args, as: [Message].self)
     }
 
     // ── Process plumbing ───────────────────────────────────────────────────

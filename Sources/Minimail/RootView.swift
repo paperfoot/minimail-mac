@@ -46,8 +46,8 @@ struct RootView: View {
                     .padding(.bottom, 12)
                     .padding(.horizontal, 16)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if state.transientStatus == .sent {
-                SentFlashToast()
+            } else if let status = state.transientStatus {
+                TransientStatusToast(status: status)
                     .padding(.bottom, 12)
                     .padding(.horizontal, 16)
                     .transition(.opacity)
@@ -74,6 +74,24 @@ struct RootView: View {
         )
         .sheet(isPresented: $bound.showKeyboardHelp) {
             KeyboardHelpView(isPresented: $bound.showKeyboardHelp)
+        }
+        // Account quick-switcher: ⌘1 … ⌘9 activates accounts in display
+        // order. Invisible buttons hijack the shortcuts without stealing
+        // focus or adding visible UI.
+        .background(accountQuickSwitcherShortcuts)
+    }
+
+    @ViewBuilder
+    private var accountQuickSwitcherShortcuts: some View {
+        ZStack {
+            ForEach(1...9, id: \.self) { n in
+                Button("") {
+                    Task { await state.selectAccount(at: n) }
+                }
+                .keyboardShortcut(KeyEquivalent(Character(String(n))), modifiers: .command)
+                .opacity(0)
+                .allowsHitTesting(false)
+            }
         }
     }
 
@@ -110,66 +128,101 @@ struct NeedsInstallView: View {
 
 struct OnboardingView: View {
     @Environment(AppState.self) private var state
-    @State private var copied: String?
-
-    private let step1 = "email-cli profile add default --api-key-env RESEND_API_KEY"
-    private let step2 = "email-cli account add you@yourdomain.com --profile default --default"
+    @State private var apiKey: String = ""
+    @State private var email: String = ""
+    @State private var inFlight: Bool = false
+    @State private var errorText: String?
 
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "envelope.open.fill")
                 .font(.system(size: 44))
                 .foregroundStyle(Color.accentColor)
-            Text("Welcome to Minimail").font(.headline)
-            Text("Minimail uses your Resend API key. Paste these into Terminal to set up your first account:")
+            Text("Welcome to Minimail")
+                .font(.headline)
+            Text("Paste your Resend API key and the email address you'll send from.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-            VStack(alignment: .leading, spacing: 8) {
-                copyableCode(step1, index: 1)
-                copyableCode(step2, index: 2)
+            VStack(alignment: .leading, spacing: 10) {
+                field(label: "API key", hint: "re_...") {
+                    SecureField("", text: $apiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                }
+                field(label: "From address", hint: "you@yourdomain.com") {
+                    TextField("", text: $email)
+                        .textFieldStyle(.roundedBorder)
+                }
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 20)
 
-            Button("Try again") {
-                Task { await state.bootstrap() }
+            if let err = errorText {
+                Text(err)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+
+            Button {
+                Task { await createAccount() }
+            } label: {
+                if inFlight {
+                    ProgressView().controlSize(.small).tint(.white)
+                } else {
+                    Text("Create Account")
+                }
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
+            .disabled(inFlight || apiKey.isEmpty || !email.looksLikeEmail)
+
+            Text("You can add more accounts later from Settings.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+
+            Link("Need an API key? Create one on Resend →",
+                 destination: URL(string: "https://resend.com/api-keys")!)
+                .font(.system(size: 11))
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func copyableCode(_ text: String, index: Int) -> some View {
-        HStack(spacing: 6) {
-            Text("\(index).").font(.system(size: 11)).foregroundStyle(.tertiary)
-            Text(text)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .lineLimit(nil)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 4)
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
-                copied = text
-                Task {
-                    try? await Task.sleep(for: .seconds(1.5))
-                    if copied == text { copied = nil }
-                }
-            } label: {
-                Image(systemName: copied == text ? "checkmark" : "doc.on.clipboard")
-                    .font(.system(size: 11))
-                    .foregroundStyle(copied == text ? .green : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Copy to clipboard")
+    private func field<Content: View>(label: String, hint: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+            content()
+            Text(hint)
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
         }
-        .padding(8)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func createAccount() async {
+        inFlight = true
+        defer { inFlight = false }
+        errorText = nil
+        let profileName = "default"
+        do {
+            // Profile creation is idempotent on the CLI (ON CONFLICT UPDATE).
+            try await EmailCLI.shared.addProfile(name: profileName, apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
+            try await EmailCLI.shared.addAccount(
+                email: email.trimmingCharacters(in: .whitespacesAndNewlines),
+                profile: profileName,
+                makeDefault: true
+            )
+            // Bootstrap re-reads accounts and flips the view back to the
+            // inbox automatically if at least one account is present now.
+            await state.bootstrap()
+        } catch {
+            errorText = error.localizedDescription
+        }
     }
 }
 
@@ -217,20 +270,60 @@ struct UndoSendToast: View {
     }
 }
 
-/// Brief confirmation flash after a queued send finishes transmitting.
-struct SentFlashToast: View {
+/// Dark capsule confirmation toast that adapts to whatever just happened.
+/// Archive includes an inline Undo button; other actions are status-only.
+struct TransientStatusToast: View {
+    @Environment(AppState.self) private var state
+    let status: TransientStatus
+
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-            Text("Sent")
+        HStack(spacing: 10) {
+            Image(systemName: iconName)
+                .foregroundStyle(iconColor)
+            Text(message)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.white)
+            Spacer()
+            if case .archived = status {
+                Button("Undo") {
+                    Task { await state.undoLastArchive() }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(Color.white.opacity(0.15), in: Capsule())
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(Color.black.opacity(0.82), in: Capsule())
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
         .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+    }
+
+    private var iconName: String {
+        switch status {
+        case .sent: return "checkmark.circle.fill"
+        case .archived: return "archivebox.fill"
+        case .deleted: return "trash.fill"
+        case .info: return "info.circle.fill"
+        }
+    }
+    private var iconColor: Color {
+        switch status {
+        case .sent: return .green
+        case .deleted: return .red
+        default: return Color.white.opacity(0.9)
+        }
+    }
+    private var message: String {
+        switch status {
+        case .sent: return "Sent"
+        case .archived(let ids, _): return ids.count == 1 ? "Archived" : "Archived \(ids.count)"
+        case .deleted(let count): return count == 1 ? "Deleted" : "Deleted \(count)"
+        case .info(let text): return text
+        }
     }
 }
