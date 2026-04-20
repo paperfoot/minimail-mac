@@ -47,7 +47,7 @@ final class InboxState {
     var focusedRowIndex: Int = -1
     var totalUnread: Int = 0
     var syncState: AppState.SyncState = .idle
-    var error: String?
+    var error: ActionableError?
     var lastPullAt: Date?
     /// Multi-select (Shift- or ⌘-click to toggle). Non-empty selection
     /// surfaces the bulk-action bar at the top of the list.
@@ -347,7 +347,7 @@ final class AppState {
                 session.currentAccount = loaded.first(where: { $0.is_default == true }) ?? loaded.first
             }
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -376,8 +376,9 @@ final class AppState {
             inbox.error = nil
             rebuildContactIndex()
         } catch {
-            inbox.error = error.localizedDescription
-            inbox.syncState = .error(error.localizedDescription)
+            let actionable = ActionableError.classify(error)
+            inbox.error = actionable
+            inbox.syncState = .error(actionable.message)
         }
     }
 
@@ -480,7 +481,7 @@ final class AppState {
             await refreshInbox(pull: false)
             flashStatus(.archived(ids: ids, deadline: Date().addingTimeInterval(Self.undoSendWindow)))
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -495,7 +496,7 @@ final class AppState {
             try await cli.unarchive(ids: ids)
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -510,7 +511,7 @@ final class AppState {
             }
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -521,7 +522,7 @@ final class AppState {
             await refreshInbox(pull: false)
             flashStatus(.info("Snoozed"))
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -531,7 +532,7 @@ final class AppState {
             await refreshInbox(pull: false)
             flashStatus(.info("Back in inbox"))
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -548,7 +549,7 @@ final class AppState {
             flashStatus(.info("Unsubscribe link opened"))
             return urlString
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
             return nil
         }
     }
@@ -568,7 +569,7 @@ final class AppState {
             inbox.clearSelection()
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -581,7 +582,7 @@ final class AppState {
             await refreshInbox(pull: false)
             flashStatus(.deleted(count: ids.count))
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -604,7 +605,7 @@ final class AppState {
             try await cli.markRead(ids: ids)
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -613,7 +614,7 @@ final class AppState {
             try await cli.markUnread(ids: [message.id])
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -625,7 +626,7 @@ final class AppState {
             try await cli.markRead(ids: [message.id])
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -634,7 +635,7 @@ final class AppState {
             try await cli.unarchive(ids: [message.id])
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -645,7 +646,7 @@ final class AppState {
             reader.loaded = nil
             await refreshInbox(pull: false)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -656,7 +657,7 @@ final class AppState {
             try await cli.downloadAttachment(messageID: messageID, attachmentID: attachment.id, to: destination)
             NSWorkspace.shared.activateFileViewerSelecting([destination])
         } catch {
-            inbox.error = "Attachment download failed: \(error.localizedDescription)"
+            inbox.error = .other("Attachment download failed: \(error.localizedDescription)")
         }
     }
 
@@ -666,7 +667,7 @@ final class AppState {
         do {
             inbox.drafts = try await cli.listDrafts(account: session.currentAccount?.email)
         } catch {
-            inbox.error = error.localizedDescription
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -863,11 +864,16 @@ final class AppState {
         } catch {
             pendingSend = nil
             pendingSendTask = nil
-            // Surface the typed CLIError payloads verbatim. The CLI encodes
-            // semantic failures (bad input, rate limit, missing config) in
-            // exit codes — making those distinguishable in the UI is better
-            // than a generic "Send failed" string.
-            inbox.error = Self.describeSendError(error)
+            // The CLI encodes rate-limit / bad-key / missing-config failures
+            // as typed errors. Use those directly when they match; otherwise
+            // fall back to the send-specific preamble so the banner doesn't
+            // just say "failed" with no context.
+            let classified = ActionableError.classify(error)
+            if case .other = classified {
+                inbox.error = .other(Self.describeSendError(error))
+            } else {
+                inbox.error = classified
+            }
             Log.send.error("send failed: \(String(describing: error), privacy: .public)")
         }
     }

@@ -17,7 +17,7 @@ struct InboxView: View {
             searchRow(bound: $boundInbox.searchQuery)
             Divider().opacity(0.15)
             if let err = inbox.error {
-                errorBanner(err)
+                ErrorBanner(error: err)
             }
             messageList
             footer
@@ -144,25 +144,11 @@ struct InboxView: View {
         .padding(.vertical, 6)
     }
 
-    private func errorBanner(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            Text(text).font(.system(size: 11)).lineLimit(2)
-            Spacer()
-            Button {
-                state.inbox.error = nil
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.orange.opacity(0.12))
-    }
+    // Error banner lives in its own view so each case owns its icon,
+    // colour, copy and CTA without one giant switch in a modifier chain.
+    // Intentionally flat: no animations, glass, or shadows — this is
+    // content, not chrome.
+
 
     @ViewBuilder
     private var messageList: some View {
