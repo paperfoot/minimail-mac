@@ -226,9 +226,9 @@ struct OnboardingView: View {
     }
 }
 
-/// Dark capsule toast shown at the bottom of the popover while a send is
-/// queued behind the undo window. Live countdown + Undo button. Tapping
-/// "Send now" skips the remaining delay.
+/// Liquid-glass capsule toast shown at the bottom of the popover while a
+/// send is queued behind the undo window. Live countdown + Undo button.
+/// Tapping "Send now" skips the remaining delay.
 struct UndoSendToast: View {
     @Environment(AppState.self) private var state
 
@@ -237,12 +237,12 @@ struct UndoSendToast: View {
             HStack(spacing: 10) {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(Color.accentColor)
                 TimelineView(.periodic(from: .now, by: 0.25)) { context in
                     let remaining = max(0, Int(pending.deadline.timeIntervalSince(context.date).rounded(.up)))
                     Text("Sending in \(remaining)s")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary)
                 }
                 Spacer()
                 Button("Undo") { state.undoPendingSend() }
@@ -251,26 +251,24 @@ struct UndoSendToast: View {
                     .foregroundStyle(Color.accentColor)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 3)
-                    .background(Color.white.opacity(0.15), in: Capsule())
+                    .background(Color.accentColor.opacity(0.15), in: Capsule())
                 Button {
                     Task { await state.flushPendingSendNow() }
                 } label: {
                     Text("Send now")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(Color.black.opacity(0.82), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+            .glassToastBackground()
         }
     }
 }
 
-/// Dark capsule confirmation toast that adapts to whatever just happened.
+/// Liquid-glass confirmation toast that adapts to whatever just happened.
 /// Archive includes an inline Undo button; other actions are status-only.
 struct TransientStatusToast: View {
     @Environment(AppState.self) private var state
@@ -282,7 +280,7 @@ struct TransientStatusToast: View {
                 .foregroundStyle(iconColor)
             Text(message)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
             Spacer()
             if case .archived = status {
                 Button("Undo") {
@@ -293,14 +291,12 @@ struct TransientStatusToast: View {
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 3)
-                .background(Color.white.opacity(0.15), in: Capsule())
+                .background(Color.accentColor.opacity(0.15), in: Capsule())
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Color.black.opacity(0.82), in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+        .glassToastBackground()
     }
 
     private var iconName: String {
@@ -315,7 +311,7 @@ struct TransientStatusToast: View {
         switch status {
         case .sent: return .green
         case .deleted: return .red
-        default: return Color.white.opacity(0.9)
+        default: return Color.accentColor
         }
     }
     private var message: String {
@@ -324,6 +320,25 @@ struct TransientStatusToast: View {
         case .archived(let ids, _): return ids.count == 1 ? "Archived" : "Archived \(ids.count)"
         case .deleted(let count): return count == 1 ? "Deleted" : "Deleted \(count)"
         case .info(let text): return text
+        }
+    }
+}
+
+/// Shared glass capsule used by the in-popover toasts. On macOS 26 this is
+/// native Liquid Glass — no custom shadow/border because the system handles
+/// those edge effects itself (per Apple's HIG). Pre-26 falls back to
+/// `.regularMaterial` with a hairline stroke so it doesn't look naked.
+extension View {
+    func glassToastBackground() -> some View {
+        Group {
+            if #available(macOS 26, *) {
+                self.glassEffect(.regular, in: .capsule)
+            } else {
+                self
+                    .background(.regularMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
+            }
         }
     }
 }
