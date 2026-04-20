@@ -67,6 +67,12 @@ struct ReaderView: View {
                 }
                 .buttonStyle(IconButtonStyle())
                 .help(msg.isStarred ? "Unstar" : "Star (S)")
+                // Bare `s` (no modifier) is intentional — Gmail / Superhuman
+                // convention for star toggle in reader view. Safe here because
+                // the reader has no descendant text fields; any TextField
+                // descendant would consume the keystroke before this fires.
+                // Do NOT move this shortcut to RootView (would swallow `s`
+                // in every search / subject / body input).
                 .keyboardShortcut("s", modifiers: [])
 
                 Menu {

@@ -1,6 +1,16 @@
 import AppKit
 import Foundation
 import Observation
+import os
+
+/// Typed os.Logger categories. Use these instead of `NSLog` / `print` so
+/// logs show up in Console.app grouped by subsystem and survive release
+/// builds where `print` is stripped. Add a new category here when you need
+/// to instrument a new subsystem — keep the list small.
+enum Log {
+    static let send = Logger(subsystem: "ai.paperfoot.minimail", category: "send")
+    static let cli = Logger(subsystem: "ai.paperfoot.minimail", category: "cli")
+}
 
 // ── Substates ─────────────────────────────────────────────────────────────
 //
@@ -858,7 +868,7 @@ final class AppState {
             // exit codes — making those distinguishable in the UI is better
             // than a generic "Send failed" string.
             inbox.error = Self.describeSendError(error)
-            NSLog("Minimail send failed: %@", "\(error)")
+            Log.send.error("send failed: \(String(describing: error), privacy: .public)")
         }
     }
 
