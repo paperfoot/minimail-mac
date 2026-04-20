@@ -100,7 +100,7 @@ struct SettingsView: View {
             await state.refreshAccounts()
             state.session.currentAccount = state.session.accounts.first { $0.email == account.email }
         } catch {
-            state.inbox.error = error.localizedDescription
+            state.inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -170,7 +170,7 @@ struct SettingsView: View {
             signatureDraft = (try await EmailCLI.shared.signature(for: account)) ?? ""
             signatureSaved = nil
         } catch {
-            state.inbox.error = error.localizedDescription
+            state.inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -189,7 +189,7 @@ struct SettingsView: View {
             }
             await state.refreshAccounts()
         } catch {
-            state.inbox.error = error.localizedDescription
+            state.inbox.error = ActionableError.classify(error)
         }
     }
 
