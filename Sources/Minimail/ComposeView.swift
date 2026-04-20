@@ -205,6 +205,7 @@ struct ComposeView: View {
             .buttonStyle(IconButtonStyle())
             .keyboardShortcut(.cancelAction)
             .help("Close (saves draft)")
+            .accessibilityLabel("Close compose — draft saved")
 
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
@@ -218,6 +219,7 @@ struct ComposeView: View {
             }
             .buttonStyle(IconButtonStyle())
             .help("Attach files (⌘⇧K)")
+            .accessibilityLabel("Attach files")
             .keyboardShortcut("k", modifiers: [.command, .shift])
 
             Menu {
@@ -242,6 +244,7 @@ struct ComposeView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help("More actions")
+            .accessibilityLabel("More compose actions")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
