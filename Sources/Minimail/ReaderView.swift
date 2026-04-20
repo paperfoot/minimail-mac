@@ -20,6 +20,7 @@ struct ReaderView: View {
             }
             .buttonStyle(IconButtonStyle())
             .keyboardShortcut(.escape, modifiers: [])
+            .help("Back to inbox (esc)")
 
             Text(state.reader.loaded?.displaySubject ?? "Loading…")
                 .font(.system(size: 13, weight: .semibold))

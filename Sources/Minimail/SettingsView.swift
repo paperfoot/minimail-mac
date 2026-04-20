@@ -63,6 +63,7 @@ struct SettingsView: View {
             }
             .buttonStyle(IconButtonStyle())
             .keyboardShortcut(.escape, modifiers: [])
+            .help("Back to inbox (esc)")
             Text("Settings").font(.system(size: 13, weight: .semibold))
             Spacer()
         }

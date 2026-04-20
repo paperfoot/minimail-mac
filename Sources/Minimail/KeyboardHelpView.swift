@@ -43,7 +43,18 @@ struct KeyboardHelpView: View {
                     section("Compose", rows: [
                         ("⌘ ⏎", "Send"),
                         ("⌘ ⇧ K", "Attach files"),
+                        ("⌘ ⇧ V", "Paste as attachment (images)"),
                         ("⎋", "Close & save draft"),
+                    ])
+                    section("Formatting", rows: [
+                        ("⌘ B", "Bold"),
+                        ("⌘ I", "Italic"),
+                        ("⌘ U", "Underline"),
+                        ("⌘ C / V / A", "Copy / Paste / Select all"),
+                        ("⌘ Z / ⌘ ⇧ Z", "Undo / Redo"),
+                    ])
+                    section("Reader", rows: [
+                        ("S", "Star / unstar"),
                     ])
                 }
                 .padding(.horizontal, 16)

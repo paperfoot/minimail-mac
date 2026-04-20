@@ -12,6 +12,8 @@ struct AccountSwitcherView: View {
                     Image(systemName: "chevron.left")
                 }
                 .buttonStyle(IconButtonStyle())
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("Back to inbox (esc)")
 
                 Text("Accounts")
                     .font(.system(size: 13, weight: .semibold))

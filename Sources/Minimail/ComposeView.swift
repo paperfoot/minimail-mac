@@ -7,8 +7,10 @@ struct ComposeView: View {
     @FocusState private var focus: Field?
     @State private var dropHighlight: Bool = false
     @State private var sendWarning: SendWarning?
+    /// Held by the rich-text toolbar so buttons can reach the live NSTextView.
+    @State private var editorHandle = RichTextEditorHandle()
 
-    enum Field { case to, cc, bcc, subject, body }
+    enum Field { case to, cc, bcc, subject }
 
     /// A warning surfaced on "Send" click that the user must acknowledge.
     struct SendWarning: Identifiable {
@@ -44,21 +46,30 @@ struct ComposeView: View {
                 Divider().opacity(0.1)
             }
 
-            TextEditor(text: $bound.body)
-                .font(.system(size: 13))
-                .padding(10)
-                .focused($focus, equals: .body)
-                .scrollContentBackground(.hidden)
-                .background(Color.clear)
-                .onChange(of: state.compose.body) { _, _ in state.scheduleAutosave() }
+            RichTextToolbar(textViewProvider: { editorHandle.textView })
+            Divider().opacity(0.1)
+
+            RichTextEditor(
+                attributedText: $bound.bodyAttributed,
+                onEdit: { state.scheduleAutosave() },
+                handle: editorHandle
+            )
 
             signaturePreview
 
             footer
         }
         .onAppear {
-            if state.compose.to.isEmpty { focus = .to }
-            else if state.compose.body.isEmpty { focus = .body }
+            if state.compose.to.isEmpty {
+                focus = .to
+            } else if state.compose.body.isEmpty {
+                // Hand focus to the NSTextView after the window exists.
+                DispatchQueue.main.async {
+                    if let tv = editorHandle.textView {
+                        tv.window?.makeFirstResponder(tv)
+                    }
+                }
+            }
         }
         // Drag files (from Finder etc.) onto any part of compose → attach.
         .onDrop(of: [.fileURL], isTargeted: $dropHighlight) { providers in
@@ -187,6 +198,7 @@ struct ComposeView: View {
             }
             .buttonStyle(IconButtonStyle())
             .keyboardShortcut(.cancelAction)
+            .help("Close (saves draft)")
 
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
@@ -446,5 +458,6 @@ struct ComposeView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .help("Send (⌘↩)")
     }
 }
