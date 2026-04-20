@@ -45,6 +45,10 @@ mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 cp Resources/Info.plist "${APP_DIR}/Contents/Info.plist"
+if [ -f Resources/AppIcon.icns ]; then
+    cp Resources/AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
+    echo "   embedded AppIcon.icns"
+fi
 if [ -n "${EMAIL_CLI}" ]; then
     cp "${EMAIL_CLI}" "${APP_DIR}/Contents/Resources/email-cli"
     chmod +x "${APP_DIR}/Contents/Resources/email-cli"
