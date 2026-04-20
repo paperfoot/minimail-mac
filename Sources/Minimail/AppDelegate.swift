@@ -18,6 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // accessory apps (cf. "Menu Bar Extras" in Human Interface Guidelines).
         Self.installMinimalMenuBar()
 
+        // Start MetricKit local diagnostics unless the user opted out.
+        // Nothing is uploaded; payloads are written to Application Support
+        // and the toggle lives in Settings → Diagnostics.
+        MetricsManager.shared.applyCurrentSetting()
+
         MinimailNotifier.shared.popoverOpener = self
         MinimailNotifier.shared.register()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
