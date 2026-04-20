@@ -65,6 +65,7 @@ struct InboxView: View {
             }
             .buttonStyle(IconButtonStyle())
             .help("New message (⌘N)")
+            .accessibilityLabel("New message")
             .keyboardShortcut("n", modifiers: .command)
 
             Button {
@@ -78,6 +79,7 @@ struct InboxView: View {
             }
             .buttonStyle(IconButtonStyle())
             .help("Refresh (⌘R)")
+            .accessibilityLabel(state.inbox.syncState == .syncing ? "Syncing" : "Refresh inbox")
             .keyboardShortcut("r", modifiers: .command)
         }
         .padding(.horizontal, 12)
@@ -413,6 +415,7 @@ struct InboxView: View {
             }
             .buttonStyle(IconButtonStyle())
             .help("Mark all read")
+            .accessibilityLabel("Mark all as read")
             .disabled(state.inbox.totalUnread == 0)
 
             Button { state.router.currentView = .settings } label: {
@@ -421,6 +424,7 @@ struct InboxView: View {
             }
             .buttonStyle(IconButtonStyle())
             .help("Settings")
+            .accessibilityLabel("Settings")
             .keyboardShortcut(",", modifiers: .command)
         }
         .padding(.horizontal, 12)
@@ -528,6 +532,7 @@ struct MessageRow: View {
             }
             .buttonStyle(.plain)
             .frame(width: 14, height: 14)
+            .accessibilityLabel("Deselect message")
         } else if hovered || !state.inbox.selection.isEmpty {
             Button { state.inbox.toggle(message.id) } label: {
                 Image(systemName: "circle")
@@ -536,6 +541,7 @@ struct MessageRow: View {
             }
             .buttonStyle(.plain)
             .frame(width: 14, height: 14)
+            .accessibilityLabel("Select message")
         } else if message.isUnread {
             Circle().fill(Color.accentColor).frame(width: 8, height: 8)
                 .frame(width: 14, height: 14)
@@ -554,6 +560,7 @@ struct MessageRow: View {
             }
             .buttonStyle(.plain)
             .help(message.isStarred ? "Unstar" : "Star")
+            .accessibilityLabel(message.isStarred ? "Unstar message" : "Star message")
 
             Button {
                 Task { await state.archive(ids: [message.id]) }
@@ -563,6 +570,7 @@ struct MessageRow: View {
             }
             .buttonStyle(.plain)
             .help("Archive")
+            .accessibilityLabel("Archive message")
         }
         .font(.system(size: 12))
     }

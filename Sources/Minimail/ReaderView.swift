@@ -21,6 +21,7 @@ struct ReaderView: View {
             .buttonStyle(IconButtonStyle())
             .keyboardShortcut(.escape, modifiers: [])
             .help("Back to inbox (esc)")
+            .accessibilityLabel("Back to inbox")
 
             Text(state.reader.loaded?.displaySubject ?? "Loading…")
                 .font(.system(size: 13, weight: .semibold))
@@ -34,6 +35,7 @@ struct ReaderView: View {
                 }
                 .buttonStyle(IconButtonStyle())
                 .help("Reply (⌘R)")
+                .accessibilityLabel("Reply")
                 .keyboardShortcut("r", modifiers: .command)
 
                 Button { state.startCompose(replyTo: msg, replyAll: true) } label: {
@@ -41,6 +43,7 @@ struct ReaderView: View {
                 }
                 .buttonStyle(IconButtonStyle())
                 .help("Reply All (⌘⇧R)")
+                .accessibilityLabel("Reply all")
                 .keyboardShortcut("r", modifiers: [.command, .shift])
 
                 Button { state.startForward(of: msg) } label: {
@@ -48,6 +51,7 @@ struct ReaderView: View {
                 }
                 .buttonStyle(IconButtonStyle())
                 .help("Forward (⌘⇧F)")
+                .accessibilityLabel("Forward")
                 .keyboardShortcut("f", modifiers: [.command, .shift])
 
                 Button {
@@ -57,6 +61,7 @@ struct ReaderView: View {
                 }
                 .buttonStyle(IconButtonStyle())
                 .help("Archive (⌘⌫)")
+                .accessibilityLabel("Archive message")
                 .keyboardShortcut(.delete, modifiers: .command)
 
                 Button {
@@ -67,6 +72,7 @@ struct ReaderView: View {
                 }
                 .buttonStyle(IconButtonStyle())
                 .help(msg.isStarred ? "Unstar" : "Star (S)")
+                .accessibilityLabel(msg.isStarred ? "Unstar message" : "Star message")
                 // Bare `s` (no modifier) is intentional — Gmail / Superhuman
                 // convention for star toggle in reader view. Safe here because
                 // the reader has no descendant text fields; any TextField
@@ -108,6 +114,7 @@ struct ReaderView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .help("More actions")
+                .accessibilityLabel("More actions")
             }
         }
         .padding(.horizontal, 12)

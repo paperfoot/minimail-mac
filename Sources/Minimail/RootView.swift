@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppState.self) private var state
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         @Bindable var bound = state
@@ -55,9 +56,14 @@ struct RootView: View {
         }
         .frame(width: 420, height: 580)
         .clipped()
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.router.currentView)
-        .animation(.spring(response: 0.25, dampingFraction: 0.9), value: state.pendingSend == nil)
-        .animation(.easeOut(duration: 0.2), value: state.transientStatus)
+        // Reduce Motion (System Settings → Accessibility) replaces the
+        // spring transitions with `nil` so nothing animates.
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+                   value: state.router.currentView)
+        .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.9),
+                   value: state.pendingSend == nil)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2),
+                   value: state.transientStatus)
         // ⌘/ shows the keyboard help sheet. We require ⌘ because a bare `?`
         // global shortcut would swallow typed `?` / `/` in every text field
         // (search box, compose body, subject, etc.).  ⌘/ matches Gmail's
