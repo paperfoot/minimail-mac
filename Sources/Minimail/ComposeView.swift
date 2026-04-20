@@ -9,6 +9,10 @@ struct ComposeView: View {
     @State private var sendWarning: SendWarning?
     /// Held by the rich-text toolbar so buttons can reach the live NSTextView.
     @State private var editorHandle = RichTextEditorHandle()
+    /// Hidden by default — clicking "Cc/Bcc" next to the To field expands
+    /// these. Gmail / Apple Mail / iOS Mail all use this pattern to save
+    /// vertical space when the user doesn't need those fields.
+    @State private var showCcBcc: Bool = false
 
     enum Field { case to, cc, bcc, subject }
 
@@ -28,14 +32,16 @@ struct ComposeView: View {
 
             fromRow
             Divider().opacity(0.1)
-            tokenRow(label: "To", binding: $bound.to)
+            toRow
                 .onChange(of: state.compose.to) { _, _ in state.scheduleAutosave() }
-            Divider().opacity(0.1)
-            tokenRow(label: "Cc", binding: $bound.cc)
-                .onChange(of: state.compose.cc) { _, _ in state.scheduleAutosave() }
-            Divider().opacity(0.1)
-            tokenRow(label: "Bcc", binding: $bound.bcc)
-                .onChange(of: state.compose.bcc) { _, _ in state.scheduleAutosave() }
+            if showCcBcc || !state.compose.cc.isEmpty || !state.compose.bcc.isEmpty {
+                Divider().opacity(0.1)
+                tokenRow(label: "Cc", binding: $bound.cc)
+                    .onChange(of: state.compose.cc) { _, _ in state.scheduleAutosave() }
+                Divider().opacity(0.1)
+                tokenRow(label: "Bcc", binding: $bound.bcc)
+                    .onChange(of: state.compose.bcc) { _, _ in state.scheduleAutosave() }
+            }
             Divider().opacity(0.1)
             textFieldRow(label: "Subject", binding: $bound.subject, field: .subject)
                 .onChange(of: state.compose.subject) { _, _ in state.scheduleAutosave() }
@@ -330,6 +336,42 @@ struct ComposeView: View {
                 .padding(.top, 4)
             EmailTokenField(text: binding, placeholder: "", suggestions: state.contactIndex)
                 .frame(minHeight: 24)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    /// Variant of tokenRow for the primary "To" field with a trailing
+    /// "Cc/Bcc" toggle button. Clicking it reveals / hides the Cc and Bcc
+    /// rows below, saving vertical space in the compact popover layout when
+    /// the user doesn't need them.
+    private var toRow: some View {
+        @Bindable var bound = state.compose
+        return HStack(alignment: .top, spacing: 10) {
+            Text("To")
+                .font(.system(size: 12))
+                .foregroundStyle(.tertiary)
+                .frame(width: 52, alignment: .leading)
+                .padding(.top, 4)
+            EmailTokenField(text: $bound.to, placeholder: "", suggestions: state.contactIndex)
+                .frame(minHeight: 24)
+            if !showCcBcc && state.compose.cc.isEmpty && state.compose.bcc.isEmpty {
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) { showCcBcc = true }
+                } label: {
+                    Text("Cc / Bcc")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(Color.primary.opacity(0.06))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Reveal Cc and Bcc fields")
+                .padding(.top, 2)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)

@@ -832,7 +832,38 @@ final class AppState {
         } catch {
             pendingSend = nil
             pendingSendTask = nil
-            inbox.error = "Send failed: \(error.localizedDescription)"
+            // Surface the typed CLIError payloads verbatim. The CLI encodes
+            // semantic failures (bad input, rate limit, missing config) in
+            // exit codes — making those distinguishable in the UI is better
+            // than a generic "Send failed" string.
+            inbox.error = Self.describeSendError(error)
+            NSLog("Minimail send failed: %@", "\(error)")
+        }
+    }
+
+    /// Map EmailCLI errors to user-facing copy that mentions what went wrong
+    /// and hints at what to fix. Unknown errors fall back to localizedDescription.
+    static func describeSendError(_ error: Error) -> String {
+        guard let cliError = error as? EmailCLI.CLIError else {
+            return "Send failed: \(error.localizedDescription)"
+        }
+        switch cliError {
+        case .configError(let stderr):
+            return "Send failed — configuration: \(stderr.prefix(240))"
+        case .badInput(let stderr):
+            return "Send failed — invalid input: \(stderr.prefix(240))"
+        case .rateLimited(let stderr):
+            return "Send failed — Resend rate limit: \(stderr.prefix(180))"
+        case .nonZeroExit(let code, let stderr):
+            return "Send failed (exit \(code)): \(stderr.prefix(240))"
+        case .notFound:
+            return "Send failed — email-cli helper not found in bundle."
+        case .decode(let err):
+            return "Send succeeded but response couldn't be decoded: \(err.localizedDescription)"
+        case .envelopeError(let msg):
+            return "Send failed: \(msg)"
+        case .cancelled:
+            return "Send cancelled."
         }
     }
 
