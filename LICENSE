@@ -1,0 +1,23 @@
+Minimail — Proprietary License
+
+Copyright (c) 2026 Paperfoot AI (SG) Pte. Ltd. (199 Biotechnologies).
+All rights reserved.
+
+Minimail is proprietary commercial software. Its use is governed by the
+End User License Agreement (EULA) at:
+
+    docs/legal/eula.md
+
+together with the Terms of Service (docs/legal/terms.md) and Privacy
+Policy (docs/legal/privacy.md).
+
+The source code is published in this repository for transparency and
+audit. Its visibility does not grant any rights beyond those expressly
+set out in the EULA. Minimail is not open source.
+
+The companion CLI engine, `email-cli`, is distributed separately under
+the MIT license:
+
+    https://github.com/paperfoot/email-cli
+
+Contact: legal@paperfoot.com
