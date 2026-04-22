@@ -433,7 +433,16 @@ final class AppState {
                let thread = try? await self.cli.readThread(id: id),
                !Task.isCancelled,
                thread.count > 1 {
-                self.reader.thread = thread
+                // The thread response uses the lightweight summary mapper
+                // (no text_body / html_body). Splice the full loaded message
+                // back in at its index so the reader doesn't render
+                // "(no body)" for the message the user actually clicked.
+                var hydrated = thread
+                if let loaded = self.reader.loaded,
+                   let idx = hydrated.firstIndex(where: { $0.id == loaded.id }) {
+                    hydrated[idx] = loaded
+                }
+                self.reader.thread = hydrated
             }
         }
         reader.inflight = task
@@ -774,6 +783,31 @@ final class AppState {
             compose.to = msg.from_addr
             let sub = msg.subject ?? ""
             compose.subject = sub.lowercased().hasPrefix("re:") ? sub : "Re: \(sub)"
+            // Reply All: pull every original recipient (to + cc) into Cc,
+            // minus the user's own address (would self-reply) and minus the
+            // person we're already replying to in `to`.
+            if replyAll {
+                let me = session.currentAccount?.email.lowercased() ?? ""
+                let primary = msg.fromParts.email.lowercased()
+                let pool = (msg.to ?? []) + (msg.cc ?? [])
+                let cc = pool
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { addr in
+                        let lower = addr.lowercased()
+                        if lower.isEmpty { return false }
+                        if lower == me { return false }
+                        // Compare by parsed email part too — handles "Name <a@x.com>".
+                        let parsed = Self.emailPart(of: addr).lowercased()
+                        return parsed != me && parsed != primary
+                    }
+                if !cc.isEmpty {
+                    compose.cc = cc.joined(separator: ", ")
+                }
+            }
+            // Prepend an attribution + quoted body so the reply has context.
+            // Apple Mail format: "On <date> at <time>, <Name> wrote:" then
+            // each original line prefixed with "> ".
+            compose.body = Self.buildReplyQuote(for: msg)
         }
         router.currentView = .compose(replyTo?.id)
     }
@@ -782,9 +816,98 @@ final class AppState {
         compose.clear()
         compose.forwardingID = message.id
         let sub = message.subject ?? ""
-        compose.subject = sub.lowercased().hasPrefix("fwd:") ? sub : "Fwd: \(sub)"
-        compose.body = "\n\n-------- Forwarded message --------\nFrom: \(message.from_addr)\nSubject: \(sub)\n\n\(message.text_body ?? "")"
+        let lowered = sub.lowercased()
+        let alreadyForwarded = lowered.hasPrefix("fwd:") || lowered.hasPrefix("fw:")
+        compose.subject = alreadyForwarded ? sub : "Fwd: \(sub)"
+        compose.body = Self.buildForwardBody(for: message)
         router.currentView = .compose(nil)
+    }
+
+    /// Email-part of "Display Name <addr@host>"; falls back to the raw value.
+    private static func emailPart(of raw: String) -> String {
+        if let open = raw.firstIndex(of: "<"),
+           let close = raw.firstIndex(of: ">"),
+           open < close {
+            return String(raw[raw.index(after: open)..<close])
+        }
+        return raw
+    }
+
+    /// Apple-Mail-style attribution + quoted original body. Quote uses the
+    /// plain text_body when available, else strips tags from html_body.
+    private static func buildReplyQuote(for msg: Message) -> String {
+        let dateBlock: String
+        if let raw = msg.created_at, let date = Dates.parse(raw) {
+            let f = DateFormatter()
+            f.dateStyle = .medium
+            f.timeStyle = .short
+            dateBlock = f.string(from: date)
+        } else {
+            dateBlock = ""
+        }
+        let sender = msg.fromParts.name ?? msg.fromParts.email
+        let header: String
+        if dateBlock.isEmpty {
+            header = "On \(sender) wrote:"
+        } else {
+            header = "On \(dateBlock), \(sender) wrote:"
+        }
+        let raw = msg.text_body
+            ?? msg.html_body.map(stripHTML)
+            ?? msg.text_preview
+            ?? ""
+        let quoted = raw
+            .split(whereSeparator: { $0.isNewline })
+            .map { "> \($0)" }
+            .joined(separator: "\n")
+        return "\n\n\(header)\n\(quoted)"
+    }
+
+    /// Forward preamble + body. Falls back to stripped HTML for HTML-only
+    /// messages so the forwarded body isn't blank.
+    private static func buildForwardBody(for msg: Message) -> String {
+        let dateBlock: String
+        if let raw = msg.created_at, let date = Dates.parse(raw) {
+            let f = DateFormatter()
+            f.dateStyle = .medium
+            f.timeStyle = .short
+            dateBlock = f.string(from: date)
+        } else {
+            dateBlock = ""
+        }
+        let body = msg.text_body
+            ?? msg.html_body.map(stripHTML)
+            ?? msg.text_preview
+            ?? ""
+        var preamble = "\n\n-------- Forwarded message --------\n"
+        preamble += "From: \(msg.from_addr)\n"
+        if !dateBlock.isEmpty { preamble += "Date: \(dateBlock)\n" }
+        preamble += "Subject: \(msg.subject ?? "")\n"
+        if let to = msg.to, !to.isEmpty {
+            preamble += "To: \(to.joined(separator: ", "))\n"
+        }
+        return preamble + "\n" + body
+    }
+
+    /// Minimal HTML → plain-text. Strips tags + collapses whitespace. Good
+    /// enough for the quoted-body / forward preamble use case where we just
+    /// want readable text, not perfect fidelity.
+    private static func stripHTML(_ html: String) -> String {
+        var out = ""
+        var inTag = false
+        for ch in html {
+            switch ch {
+            case "<": inTag = true
+            case ">": inTag = false
+            default:
+                if !inTag { out.append(ch) }
+            }
+        }
+        // Collapse runs of whitespace, preserve paragraph breaks.
+        let lines = out.split(whereSeparator: { $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return lines.joined(separator: "\n")
     }
 
     /// User-initiated send. Validates, captures a snapshot, returns the user
