@@ -821,6 +821,38 @@ final class AppState {
         compose.subject = alreadyForwarded ? sub : "Fwd: \(sub)"
         compose.body = Self.buildForwardBody(for: message)
         router.currentView = .compose(nil)
+        // Re-attach the original's attachments. Fire-and-forget — the user
+        // sees the compose window open immediately and the chips slide in
+        // as each file downloads. Fails silently per-file (manifests as a
+        // missing attachment in the chip row).
+        Task { [weak self] in await self?.reattachOriginalAttachments(for: message.id) }
+    }
+
+    /// Download every attachment on the source message into a temp directory
+    /// and append the file URLs to `compose.attachments`. Mirrors what Apple
+    /// Mail / Gmail do when you Forward — the user expects the original
+    /// files to ride along.
+    private func reattachOriginalAttachments(for messageID: Int64) async {
+        guard let list = try? await cli.listAttachments(messageID: messageID),
+              !list.isEmpty else { return }
+        let tempBase = FileManager.default.temporaryDirectory
+            .appendingPathComponent("minimail-fwd-\(messageID)-\(Int(Date().timeIntervalSince1970))",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        for attachment in list {
+            let filename = attachment.filename ?? "attachment-\(attachment.id)"
+            let dest = tempBase.appendingPathComponent(filename)
+            do {
+                try await cli.downloadAttachment(messageID: messageID,
+                                                 attachmentID: attachment.id,
+                                                 to: dest)
+                if !compose.attachments.contains(dest) {
+                    compose.attachments.append(dest)
+                }
+            } catch {
+                Log.cli.error("forward re-attach failed for \(filename, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
     }
 
     /// Email-part of "Display Name <addr@host>"; falls back to the raw value.

@@ -270,8 +270,10 @@ struct ReaderView: View {
     @ViewBuilder
     private func body(for msg: Message) -> some View {
         if let html = msg.html_body, !html.isEmpty {
+            // HTMLBodyView self-sizes to its content height now — don't add
+            // a fixed `.frame(minHeight:)` here or it caps short messages
+            // and reintroduces the inner-scrollbar problem we just fixed.
             HTMLBodyView(html: html)
-                .frame(minHeight: 280)
         } else if let text = msg.text_body, !text.isEmpty {
             Text(text)
                 .font(.system(size: 13))

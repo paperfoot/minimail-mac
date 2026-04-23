@@ -1,55 +1,106 @@
 import SwiftUI
 @preconcurrency import WebKit
 
-struct HTMLBodyView: NSViewRepresentable {
+/// SwiftUI wrapper that renders sanitised email HTML in a WKWebView and
+/// **resizes itself to the content's natural height** so the outer
+/// SwiftUI `ScrollView` is the only scroller in the hierarchy. This is what
+/// eliminates the "multiple stacked scrollbars" we used to see in a thread
+/// view: the inner WKWebView no longer scrolls, the outer SwiftUI ScrollView
+/// does the scrolling for the entire thread.
+///
+/// Performance: the content-blocking rule list is compiled **once globally**
+/// (cached static) and reused across every WKWebView instance — opening a
+/// 3-message thread no longer pays the rule-list-compile cost three times.
+struct HTMLBodyView: View {
     let html: String
+    /// Measured natural height after the page renders. Seeded with a small
+    /// non-zero placeholder so the view doesn't collapse before the first
+    /// measurement comes back.
+    @State private var measuredHeight: CGFloat = 80
+
+    var body: some View {
+        HTMLWebView(html: html, height: $measuredHeight)
+            .frame(height: measuredHeight)
+    }
+}
+
+/// NSViewRepresentable doing the actual WKWebView work. Reports its content
+/// height back to the SwiftUI parent via a binding so the parent can resize
+/// itself instead of the web view scrolling internally.
+private struct HTMLWebView: NSViewRepresentable {
+    let html: String
+    @Binding var height: CGFloat
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        // Disable JS outright. Email never needs to execute scripts.
+        // `allowsContentJavaScript = false` blocks scripts inside the loaded
+        // page (security: tracking/exfil). It does NOT prevent host-side
+        // `evaluateJavaScript(_:)` calls — those still work, which is how we
+        // measure content height after layout.
         let prefs = WKWebpagePreferences()
         prefs.allowsContentJavaScript = false
         config.defaultWebpagePreferences = prefs
-        // Use a non-persistent data store so cookies/caches don't leak between emails.
         config.websiteDataStore = .nonPersistent()
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground") // transparent
+        webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
-
-        // Block ALL remote resource loads -- tracking pixels, CSS, fonts, iframes.
-        // Compile-then-load race: if HTML loads before the rule list is added,
-        // tracking pixels fire. We gate the first load on the rule list install
-        // by queuing the HTML on the coordinator and flushing from the compile
-        // completion. Subsequent updates are safe because the list is installed.
         context.coordinator.webView = webView
 
-        WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: "minimail-block-remote",
-            encodedContentRuleList: Self.blockRulesJSON
-        ) { list, _ in
-            guard let list else {
-                // Failed to compile — still allow content through (rare).
-                context.coordinator.rulesReady = true
-                context.coordinator.flushPending()
-                return
-            }
-            webView.configuration.userContentController.add(list)
-            context.coordinator.rulesReady = true
-            context.coordinator.flushPending()
-        }
+        // Install the cached rule list (compiled once globally). If it's not
+        // ready yet, queue the first HTML load until it is — same race-fix
+        // pattern as the previous implementation.
+        Self.attachRuleList(to: webView, coordinator: context.coordinator)
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         let wrapped = Self.wrap(html)
+        if context.coordinator.lastLoadedHTML == wrapped { return }
         context.coordinator.pendingHTML = wrapped
         if context.coordinator.rulesReady {
             context.coordinator.flushPending()
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    // ── Cached content rule list ─────────────────────────────────────────
+
+    /// Compile state for the shared content-blocking rule list. The closure
+    /// completion fires on the main thread; subscribers are notified there.
+    @MainActor private static var cachedRuleList: WKContentRuleList?
+    @MainActor private static var rulesPending: [(WKContentRuleList?) -> Void] = []
+    @MainActor private static var compileStarted = false
+
+    @MainActor
+    private static func attachRuleList(to webView: WKWebView, coordinator: Coordinator) {
+        if let list = cachedRuleList {
+            webView.configuration.userContentController.add(list)
+            coordinator.rulesReady = true
+            coordinator.flushPending()
+            return
+        }
+        rulesPending.append { [weak webView, weak coordinator] list in
+            guard let webView, let coordinator else { return }
+            if let list { webView.configuration.userContentController.add(list) }
+            coordinator.rulesReady = true
+            coordinator.flushPending()
+        }
+        guard !compileStarted else { return }
+        compileStarted = true
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "minimail-block-remote",
+            encodedContentRuleList: blockRulesJSON
+        ) { list, _ in
+            Task { @MainActor in
+                cachedRuleList = list
+                let waiting = rulesPending
+                rulesPending = []
+                for cb in waiting { cb(list) }
+            }
+        }
+    }
 
     private static let blockRulesJSON: String = """
     [
@@ -59,16 +110,57 @@ struct HTMLBodyView: NSViewRepresentable {
     ]
     """
 
+    // ── Coordinator ──────────────────────────────────────────────────────
+
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
+        let parent: HTMLWebView
         weak var webView: WKWebView?
         var rulesReady = false
         var pendingHTML: String?
+        var lastLoadedHTML: String?
+
+        init(parent: HTMLWebView) { self.parent = parent }
 
         func flushPending() {
             guard let html = pendingHTML, let webView else { return }
             webView.loadHTMLString(html, baseURL: nil)
+            lastLoadedHTML = html
             pendingHTML = nil
+        }
+
+        // After the page lays out, ask the document for its real scrollHeight
+        // and feed that back to SwiftUI so the parent frame matches. This is
+        // what makes the outer SwiftUI scroll view the *only* scroller.
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            measureHeight(in: webView)
+            // Layout sometimes changes after async font / image load even in
+            // our sanitised HTML (e.g. unicode glyph fallback). Re-measure
+            // briefly so the final height is correct.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+                guard let self, let webView = self.webView else { return }
+                self.measureHeight(in: webView)
+            }
+        }
+
+        private func measureHeight(in webView: WKWebView) {
+            webView.evaluateJavaScript(
+                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
+            ) { [weak self] result, _ in
+                guard let self else { return }
+                let h: CGFloat = {
+                    if let n = result as? CGFloat { return n }
+                    if let n = result as? Double { return CGFloat(n) }
+                    if let n = result as? Int { return CGFloat(n) }
+                    return 80
+                }()
+                let clamped = max(40, min(h, 8000))
+                Task { @MainActor in
+                    if abs(self.parent.height - clamped) > 1 {
+                        self.parent.height = clamped
+                    }
+                }
+            }
         }
 
         // Block all remote resource loads so tracking pixels don't fire.
@@ -91,16 +183,16 @@ struct HTMLBodyView: NSViewRepresentable {
         }
     }
 
+    // ── HTML wrapping ────────────────────────────────────────────────────
+
     private static func wrap(_ body: String) -> String {
         let prefersDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let fg = prefersDark ? "#f5f5f7" : "#1d1d1f"
         let link = "#0a84ff"
         let transformed = collapseQuotedText(body)
-        // Transparent outer wrapper so the popover's glass background shows
-        // through for plain-text and minimally-styled emails. Marketing HTML
-        // that sets its own backgrounds still renders normally -- their inline
-        // styles win. The `!important` on html/body prevents stray inline
-        // styles from forcing opaque backgrounds on the top-level nodes.
+        // Note: `html, body { overflow: hidden }` belt-and-braces with the
+        // outer SwiftUI height-binding so the WKWebView never tries to
+        // present its own scrollbar. The outer ScrollView is the only one.
         return """
         <!doctype html><html><head>
         <meta charset="utf-8">
@@ -114,15 +206,13 @@ struct HTMLBodyView: NSViewRepresentable {
             font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
             -webkit-font-smoothing: antialiased;
             text-size-adjust: 100%;
+            overflow: hidden;
           }
           body > :first-child { margin-top: 0; }
           a { color: \(link); }
           img { max-width: 100%; height: auto; }
           img[src^="http"], img[src^="https"] { display: none; }
           table { max-width: 100% !important; }
-          /* Kill full-width background wrappers that marketing emails use
-             to paint the whole viewport. The inner content's own styling
-             still renders. */
           body > table, body > div {
             background: transparent !important;
             background-color: transparent !important;
@@ -134,10 +224,7 @@ struct HTMLBodyView: NSViewRepresentable {
             color: rgba(127,127,127,0.9);
             margin: 12px 0;
           }
-          /* Collapsed-quote toggle injected by collapseQuotedText */
-          details.mm-quote {
-            margin: 8px 0 12px 0;
-          }
+          details.mm-quote { margin: 8px 0 12px 0; }
           details.mm-quote > summary {
             cursor: pointer;
             display: inline-block;
@@ -157,11 +244,7 @@ struct HTMLBodyView: NSViewRepresentable {
     }
 
     /// Wrap every top-level blockquote in a `<details>` so the quoted reply
-    /// history is collapsed by default. Uses native HTML5 `<details>` which
-    /// works without JS — essential since our WKWebView disables scripts.
-    /// Leaves already-closed emails alone by matching on raw `<blockquote>`
-    /// / `</blockquote>` tags with a simple state machine (regex can't depth-
-    /// count, but we only need pair-balance per top level).
+    /// history is collapsed by default. Pure HTML5 — no JS needed.
     private static func collapseQuotedText(_ html: String) -> String {
         let open = "<blockquote"
         let close = "</blockquote>"
@@ -171,11 +254,8 @@ struct HTMLBodyView: NSViewRepresentable {
 
         while idx < html.endIndex {
             if depth == 0, html[idx...].hasPrefix(open) {
-                // Emit the summary wrapper only for the outermost blockquote.
                 out += "<details class=\"mm-quote\"><summary>Show quoted content</summary>"
                 depth = 1
-                // Consume "<blockquote" and keep scanning for the matching ">"
-                // so attributes stay intact.
                 let tagRange = html.range(of: ">", range: idx..<html.endIndex)
                 if let tagRange {
                     out.append(contentsOf: html[idx..<tagRange.upperBound])
