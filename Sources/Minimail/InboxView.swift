@@ -141,6 +141,11 @@ struct InboxView: View {
                 $0.direction == "received" && !$0.isArchived && !$0.isSnoozed && $0.isUnread
             }.count
             return n > 0 ? n : nil
+        case .unread:
+            // Authoritative CLI-sourced count — matches the footer badge
+            // and survives across the 100-row window (messages we don't
+            // have loaded still contribute). Mirror of inbox.totalUnread.
+            return inbox.totalUnread > 0 ? inbox.totalUnread : nil
         case .starred:
             let n = inbox.messages.filter { $0.isStarred && !$0.isArchived }.count
             return n > 0 ? n : nil
@@ -426,6 +431,7 @@ struct InboxView: View {
     private var emptyIcon: String {
         switch state.inbox.currentFolder {
         case .inbox: return "tray"
+        case .unread: return "envelope.badge"
         case .starred: return "star"
         case .snoozed: return "alarm"
         case .sent: return "paperplane"
@@ -440,6 +446,7 @@ struct InboxView: View {
         }
         switch state.inbox.currentFolder {
         case .inbox: return "Inbox is empty"
+        case .unread: return "All caught up"
         case .starred: return "No starred messages"
         case .snoozed: return "Nothing snoozed"
         case .sent: return "Nothing sent yet"

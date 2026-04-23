@@ -32,6 +32,7 @@ final class SessionState {
 final class InboxState {
     enum Folder: String, Hashable, CaseIterable {
         case inbox = "Inbox"
+        case unread = "Unread"
         case starred = "Starred"
         case snoozed = "Snoozed"
         case sent = "Sent"
@@ -81,6 +82,14 @@ final class InboxState {
             // Hide currently-snoozed messages from the main inbox.
             return messages.filter {
                 $0.direction == "received" && !$0.isArchived && !$0.isSnoozed
+            }
+        case .unread:
+            // Unread, not archived, not snoozed. Matches the "Unread"
+            // folder tab so the user can one-click-focus unread messages
+            // without hunting for the blue dots. `isUnread` is the typed
+            // accessor on Message (= direction == "received" && !is_read).
+            return messages.filter {
+                $0.isUnread && !$0.isArchived && !$0.isSnoozed
             }
         case .starred:
             return messages.filter { $0.isStarred && !$0.isArchived }
