@@ -153,6 +153,10 @@ struct RichTextToolbar: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help(help)
+        // VoiceOver: the `help` string already describes the action + key
+        // shortcut ("Bold (⌘B)"), so reuse it as the accessibility label
+        // rather than surface the raw SF Symbol name ("bold").
+        .accessibilityLabel(help)
     }
 
     /// Prepend a simple list marker to each selected line. Keeps the HTML
