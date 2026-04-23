@@ -8,10 +8,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     private var eventMonitor: Any?
     private var pollTimer: Timer?
-    /// Guard so that popover-close + application-terminate don't both try to
-    /// flush the same autosave/pending-send pair. Either path sets this to
-    /// true before running; the other short-circuits.
-    private var didFlushOnShutdown = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // LSUIElement apps don't get a default menu, which means NSTextField
@@ -171,12 +167,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // with an undo-window still open, any debounced autosave is still
         // pending and the undo-send timer has not fired yet. Flush both now
         // so we never lose the user's keystrokes or their queued outbound
-        // message. Cheap no-op when there is nothing to flush.
-        //
-        // One-shot guard prevents popover-close + terminate from racing each
-        // other. Whichever path fires first wins; the other short-circuits.
-        if didFlushOnShutdown { return }
-        didFlushOnShutdown = true
+        // message. Both flushes are idempotent (cancelled task is a no-op,
+        // empty pendingSend is a no-op), so firing on every close is safe —
+        // the previous one-shot `didFlushOnShutdown` guard actively HURT us:
+        // only the first close in the app's lifetime flushed; every close
+        // thereafter was a silent data-loss window.
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.appState.flushAutosave()
@@ -185,25 +180,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// NSApp gives us ~5 seconds to return from this before it hard-kills us.
-    /// We use that window to synchronously drain the autosave debounce and
-    /// the undo-send queue so the user's last keystrokes and last queued
-    /// message survive quit. We use `DispatchSemaphore` here rather than a
-    /// Task-based await because `applicationWillTerminate` does not return
-    /// to a run loop — an async Task would be torn down with its work
-    /// incomplete. The popoverDidClose path has already done this work if
-    /// the user closed the popover first (guarded by `didFlushOnShutdown`).
+    /// We use that window to drain the autosave debounce and the undo-send
+    /// queue so the user's last keystrokes and last queued message survive
+    /// quit.
+    ///
+    /// Concurrency correctness note: a `DispatchSemaphore.wait()` here would
+    /// block the MainActor while the flush Task (also MainActor-bound) is
+    /// trying to schedule on it — classic deadlock until our 4-second
+    /// timeout. Instead we run the Task detached and pump `RunLoop.current`
+    /// in short intervals; that keeps the MainActor alive so the flush's
+    /// async hops (CLI calls, attachment writes, etc.) can actually execute.
     func applicationWillTerminate(_ notification: Notification) {
-        if didFlushOnShutdown { return }
-        didFlushOnShutdown = true
-        let sem = DispatchSemaphore(value: 0)
-        Task { @MainActor [weak self] in
-            defer { sem.signal() }
-            guard let self else { return }
-            await self.appState.flushAutosave()
-            await self.appState.flushPendingSendNow()
+        let done = DispatchSemaphore(value: 0)
+        let state = appState
+        Task.detached {
+            await state.flushAutosave()
+            await state.flushPendingSendNow()
+            done.signal()
         }
-        // Cap the wait so we never deadlock NSApp.terminate(). 4s < 5s budget.
-        _ = sem.wait(timeout: .now() + 4.0)
+        // Budget: 4.5 seconds total (NSApp gives us 5; keep 0.5s safety).
+        let deadline = Date().addingTimeInterval(4.5)
+        while done.wait(timeout: .now() + 0.05) == .timedOut {
+            if Date() > deadline { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
     }
 
     /// Build and install a minimal NSMenu so the standard Cocoa text-editing
