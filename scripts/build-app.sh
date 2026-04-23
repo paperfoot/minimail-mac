@@ -55,11 +55,36 @@ if [ -n "${EMAIL_CLI}" ]; then
     echo "   embedded email-cli from ${EMAIL_CLI}"
 fi
 
-# ── Sign everything ad-hoc ────────────────────────────────────────────
-echo "▸ ad-hoc codesigning"
-if [ -f "${APP_DIR}/Contents/Resources/email-cli" ]; then
-    codesign --force --sign - "${APP_DIR}/Contents/Resources/email-cli"
+# ── Sign ──────────────────────────────────────────────────────────────
+# SIGNING_IDENTITY (env): if set, full Developer ID signing with hardened
+# runtime + entitlements (required for notarization). If unset, ad-hoc
+# signing for local dev builds. Sign inner binaries before outer bundle —
+# --deep is avoided because modern codesign prefers per-binary signing.
+ENTITLEMENTS="Resources/Minimail.entitlements"
+if [ -n "${SIGNING_IDENTITY:-}" ]; then
+    echo "▸ codesigning with '${SIGNING_IDENTITY}' (hardened runtime)"
+    if [ ! -f "${ENTITLEMENTS}" ]; then
+        echo "✗ missing entitlements file: ${ENTITLEMENTS}" >&2
+        exit 1
+    fi
+    if [ -f "${APP_DIR}/Contents/Resources/email-cli" ]; then
+        codesign --force --timestamp --options runtime \
+            --entitlements "${ENTITLEMENTS}" \
+            --sign "${SIGNING_IDENTITY}" \
+            "${APP_DIR}/Contents/Resources/email-cli"
+    fi
+    codesign --force --timestamp --options runtime \
+        --entitlements "${ENTITLEMENTS}" \
+        --sign "${SIGNING_IDENTITY}" \
+        "${APP_DIR}"
+    # Verify strict signature so we fail fast here instead of during notarization
+    codesign --verify --strict --verbose=2 "${APP_DIR}"
+else
+    echo "▸ ad-hoc codesigning (dev build; set SIGNING_IDENTITY for Developer ID)"
+    if [ -f "${APP_DIR}/Contents/Resources/email-cli" ]; then
+        codesign --force --sign - "${APP_DIR}/Contents/Resources/email-cli"
+    fi
+    codesign --force --deep --sign - "${APP_DIR}"
 fi
-codesign --force --deep --sign - "${APP_DIR}"
 
 echo "✓ built ${APP_DIR}"
