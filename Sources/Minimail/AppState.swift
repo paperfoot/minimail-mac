@@ -113,6 +113,15 @@ final class ReaderState {
     var expandedThreadIDs: Set<Int64> = []
     /// Non-nil = delete confirmation dialog is up for this message id.
     var pendingDeleteConfirm: Int64?
+    /// Pre-computed "3 of 24" label shown in the reader footer. Populated by
+    /// `AppState.open(message:)` once per navigation so the footer doesn't
+    /// need to call `inbox.visible()` (filter+sort over 100+ messages) on
+    /// every re-render of the reader.
+    var positionLabel: String?
+    /// Pre-computed count of blocked remote images in the current message's
+    /// HTML body. Populated once per navigation; avoids compiling an
+    /// `NSRegularExpression` on every render of the reader footer.
+    var trackerCount: Int = 0
 }
 
 @MainActor
@@ -422,59 +431,108 @@ final class AppState {
 
     // ── Selection / navigation ────────────────────────────────────────────
 
+    /// Static regex for tracking-pixel counting — was compiled inside the
+    /// reader's footer on every render. Matches `<img ... src="http://">`
+    /// or `https://` which is what our WKContentRuleList blocks.
+    private static let trackingRegex = try! NSRegularExpression(
+        pattern: "<img[^>]+src=\"https?://",
+        options: [.caseInsensitive]
+    )
+
     func open(message: Message) {
-        reader.loaded = message     // show cached list-row version immediately
-        reader.error = nil
+        // Seed immediately with the cached list-row version so the reader
+        // has a body to render before the full-detail fetch returns. All of
+        // these writes are synchronous so SwiftUI coalesces them into a
+        // single re-render (per Donny Wals: body re-evaluations in the same
+        // render loop collapse to one redraw).
+        reader.loaded = message
+        if reader.error != nil { reader.error = nil }   // guard no-op write
         router.currentView = .reader(message.id)
+        updateReaderDerived(for: message)
         loadFullMessage(id: message.id)
 
+        // Mark-read path: mutate the message in-place instead of re-fetching
+        // the whole inbox via refreshInbox. The old refresh ran listInbox x3
+        // + rebuildContactIndex DURING the spring transition — ~25ms of
+        // unrelated work that starved the animation. In-place flip is O(1).
         if message.isUnread {
-            Task { [id = message.id] in
-                try? await cli.markRead(ids: [id])
-                await self.refreshInbox(pull: false)
+            Task { [weak self, id = message.id] in
+                try? await self?.cli.markRead(ids: [id])
+                guard let self else { return }
+                if let idx = self.inbox.messages.firstIndex(where: { $0.id == id }) {
+                    self.inbox.messages[idx].is_read = true
+                }
+                self.inbox.totalUnread = max(0, self.inbox.totalUnread - 1)
             }
+        }
+    }
+
+    /// Refresh cached reader-footer values when navigating to a message.
+    /// Called once per `open()` — avoids per-render `inbox.visible()` filter
+    /// and per-render `NSRegularExpression` compile in the footer.
+    private func updateReaderDerived(for message: Message) {
+        let list = inbox.visible()
+        if let idx = list.firstIndex(where: { $0.id == message.id }) {
+            reader.positionLabel = "\(idx + 1) of \(list.count)"
+        } else {
+            reader.positionLabel = nil
+        }
+        if let html = message.html_body, !html.isEmpty {
+            let range = NSRange(html.startIndex..., in: html)
+            reader.trackerCount = Self.trackingRegex.numberOfMatches(in: html, range: range)
+        } else {
+            reader.trackerCount = 0
         }
     }
 
     private func loadFullMessage(id: Int64) {
         reader.inflight?.cancel()
+        // Batch the synchronous reset writes — all in one tick, one redraw.
         reader.isLoading = true
         reader.attachments = []
         reader.thread = []
         reader.expandedThreadIDs = [id]
+
         let task = Task { [weak self] in
             guard let self else { return }
+
+            // Phase 1 — fetch the detail body (the user-visible work).
+            // Writing loaded + error + isLoading here is three properties in
+            // the same tick → SwiftUI coalesces into one render.
             do {
                 let detail = try await self.cli.readMessage(id: id, markRead: false)
-                if !Task.isCancelled {
-                    self.reader.loaded = detail
-                    self.reader.error = nil
-                }
-            } catch {
-                if !Task.isCancelled {
-                    self.reader.error = error.localizedDescription
-                }
-            }
-            if !Task.isCancelled {
+                if Task.isCancelled { return }
+                self.reader.loaded = detail
+                if self.reader.error != nil { self.reader.error = nil }
                 self.reader.isLoading = false
+                self.updateReaderDerived(for: detail)
+            } catch {
+                if Task.isCancelled { return }
+                self.reader.error = error.localizedDescription
+                self.reader.isLoading = false
+                return
             }
-            // Attachments: best-effort, non-blocking for the body render.
-            if !Task.isCancelled,
-               let list = try? await self.cli.listAttachments(messageID: id),
-               !Task.isCancelled {
-                self.reader.attachments = list
-            }
-            // Thread relatives: also best-effort. The CLI returns [seed] when
-            // there are no related headers, so we only swap in real multi-
-            // message threads to avoid noisy "1 of 1" chrome.
-            if !Task.isCancelled,
-               let thread = try? await self.cli.readThread(id: id),
-               !Task.isCancelled,
-               thread.count > 1 {
-                // The thread response uses the lightweight summary mapper
-                // (no text_body / html_body). Splice the full loaded message
-                // back in at its index so the reader doesn't render
-                // "(no body)" for the message the user actually clicked.
+
+            // Phase 2 — deferred: wait for the open-spring to settle, then
+            // fetch attachments + thread in parallel. Doing this after the
+            // transition means the extra CLI work doesn't compete with
+            // animation frames, and writing both results in a single tick
+            // (one redraw) instead of two sequential awaits (two redraws).
+            try? await Task.sleep(nanoseconds: 350_000_000) // 350ms ≈ spring settle
+            if Task.isCancelled { return }
+
+            async let attachmentsTask = self.cli.listAttachments(messageID: id)
+            async let threadTask = self.cli.readThread(id: id)
+            let attachments = (try? await attachmentsTask) ?? []
+            let thread = (try? await threadTask) ?? []
+            if Task.isCancelled { return }
+
+            self.reader.attachments = attachments
+            if thread.count > 1 {
+                // Splice the full-body message back at its position — the
+                // thread endpoint returns lightweight summaries without
+                // text_body / html_body, and we'd render "(no body)" for
+                // the seed without this hydration.
                 var hydrated = thread
                 if let loaded = self.reader.loaded,
                    let idx = hydrated.firstIndex(where: { $0.id == loaded.id }) {

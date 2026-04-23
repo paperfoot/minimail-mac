@@ -383,7 +383,14 @@ struct ReaderView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        // Tracker count + position label are pre-computed in
+        // `AppState.updateReaderDerived(for:)` (called from `open()`). This
+        // avoids running `NSRegularExpression` + `inbox.visible()` on every
+        // reader re-render — both were showing up in Instruments profiles
+        // as hot paths during the open spring animation.
+        let trackerCount = state.reader.trackerCount
+        let positionLabel = state.reader.positionLabel
+        return HStack(spacing: 8) {
             if let msg = state.reader.loaded {
                 Button { state.startCompose(replyTo: msg) } label: {
                     Label("Reply", systemImage: "arrowshape.turn.up.left")
@@ -391,42 +398,24 @@ struct ReaderView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             }
-            if let msg = state.reader.loaded,
-               let html = msg.html_body,
-               let count = Self.trackingPixelCount(in: html),
-               count > 0 {
+            if trackerCount > 0 {
                 HStack(spacing: 3) {
                     Image(systemName: "shield.lefthalf.filled")
                         .font(.system(size: 9))
-                    Text("Blocked \(count) tracker\(count == 1 ? "" : "s")")
+                    Text("Blocked \(trackerCount) tracker\(trackerCount == 1 ? "" : "s")")
                         .font(.system(size: 10))
                 }
                 .foregroundStyle(.tertiary)
                 .help("Remote images blocked to prevent read tracking")
             }
             Spacer()
-            // Message position indicator — "3 of 24" style
-            if let msg = state.reader.loaded {
-                let list = state.inbox.visible()
-                if let idx = list.firstIndex(where: { $0.id == msg.id }) {
-                    Text("\(idx + 1) of \(list.count)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
+            if let label = positionLabel {
+                Text(label)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-    }
-
-    /// Count of `<img src="http...">` elements — a proxy for tracking-pixel
-    /// density since those are exactly the images our WKContentRuleList
-    /// blocks. Bounded at a simple regex match; good enough for a badge.
-    private static func trackingPixelCount(in html: String) -> Int? {
-        let pattern = "<img[^>]+src=\"https?://"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-        return regex.numberOfMatches(in: html, range: NSRange(html.startIndex..., in: html))
     }
 }
