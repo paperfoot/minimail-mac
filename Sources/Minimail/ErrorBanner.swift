@@ -61,6 +61,9 @@ struct ErrorBanner: View {
         case .invalidAPIKey: return "key.fill"
         case .rateLimited: return "hourglass"
         case .cliMissing: return "terminal.fill"
+        case .diskFull: return "externaldrive.badge.exclamationmark"
+        case .fileNotFound: return "doc.questionmark"
+        case .permissionDenied: return "lock.fill"
         case .other: return "exclamationmark.triangle.fill"
         }
     }
@@ -71,6 +74,8 @@ struct ErrorBanner: View {
         case .invalidAPIKey: return .red
         case .rateLimited: return .yellow
         case .cliMissing: return .blue
+        case .diskFull, .permissionDenied: return .red
+        case .fileNotFound: return .orange
         case .other: return .orange
         }
     }
@@ -85,6 +90,9 @@ struct ErrorBanner: View {
             }
             return "Rate-limited"
         case .cliMissing: return "email-cli not installed"
+        case .diskFull: return "Disk is full"
+        case .fileNotFound: return "File not found"
+        case .permissionDenied: return "Permission denied"
         case .other: return "Something went wrong"
         }
     }
@@ -99,6 +107,12 @@ struct ErrorBanner: View {
             return "Resend briefly throttled the request. We'll retry automatically."
         case .cliMissing:
             return "brew install paperfoot/tap/email-cli, then reopen Minimail."
+        case .diskFull:
+            return "Free up space on the destination drive and retry."
+        case .fileNotFound:
+            return "The file may have been moved, deleted, or its volume unmounted."
+        case .permissionDenied:
+            return "Pick a folder you can write to (Desktop, Documents, or Downloads)."
         case .other(let msg):
             return msg
         }
@@ -123,7 +137,10 @@ struct ErrorBanner: View {
             return BannerAction(title: "Retry") {
                 Task { await state.refreshInbox() }
             }
-        case .cliMissing, .other:
+        // Filesystem + CLI-missing errors: no in-banner retry — the user
+        // needs to fix something outside the app first (free disk, pick
+        // a different folder, install the CLI).
+        case .cliMissing, .diskFull, .fileNotFound, .permissionDenied, .other:
             return nil
         }
     }
