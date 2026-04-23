@@ -3,6 +3,13 @@ import SwiftUI
 struct ReaderView: View {
     let messageID: Int64
     @Environment(AppState.self) private var state
+    /// Per-message opt-in for remote content (images / stylesheets / fonts
+    /// that the privacy filter normally blocks). Reset whenever the user
+    /// navigates to a different message — the choice must NEVER persist
+    /// across messages, or we'd silently re-enable tracking for a message
+    /// the user hasn't seen yet. `onChange(of: state.reader.loaded?.id)`
+    /// below enforces the reset.
+    @State private var remoteContentAllowed: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,6 +17,11 @@ struct ReaderView: View {
             Divider().opacity(0.3)
             content
             footer
+        }
+        // Per-message reset: the moment the user j/k's or taps another
+        // message, drop the allowance so the next message starts blocked.
+        .onChange(of: state.reader.loaded?.id) { _, _ in
+            if remoteContentAllowed { remoteContentAllowed = false }
         }
     }
 
@@ -273,7 +285,13 @@ struct ReaderView: View {
             // HTMLBodyView self-sizes to its content height now — don't add
             // a fixed `.frame(minHeight:)` here or it caps short messages
             // and reintroduces the inner-scrollbar problem we just fixed.
-            HTMLBodyView(html: html)
+            // The `remoteContentAllowed` flag is per-message (see ReaderView
+            // @State) and only flips when the user explicitly clicks the
+            // "Load remote content" button in the footer.
+            HTMLBodyView(
+                html: html,
+                remoteContentAllowed: remoteContentAllowed && msg.id == state.reader.loaded?.id
+            )
         } else if let text = msg.text_body, !text.isEmpty {
             Text(text)
                 .font(.system(size: 13))
@@ -398,15 +416,38 @@ struct ReaderView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             }
+            // The privacy filter blocks ALL remote resources (images,
+            // stylesheets, fonts, media) — not just tracking pixels — so
+            // the old "Blocked N trackers" wording was misleading.
+            // Accurate framing: "Remote content blocked — click to load".
+            // Clicking opts in for THIS message only; the @State resets
+            // to false as soon as the user moves to another message.
             if trackerCount > 0 {
-                HStack(spacing: 3) {
-                    Image(systemName: "shield.lefthalf.filled")
-                        .font(.system(size: 9))
-                    Text("Blocked \(trackerCount) tracker\(trackerCount == 1 ? "" : "s")")
-                        .font(.system(size: 10))
+                if remoteContentAllowed {
+                    HStack(spacing: 3) {
+                        Image(systemName: "shield.slash")
+                            .font(.system(size: 9))
+                        Text("Remote content loaded")
+                            .font(.system(size: 10))
+                    }
+                    .foregroundStyle(.tertiary)
+                    .help("Images and styles loaded for this message only")
+                } else {
+                    Button {
+                        remoteContentAllowed = true
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "shield.lefthalf.filled")
+                                .font(.system(size: 9))
+                            Text("Remote content blocked — click to load")
+                                .font(.system(size: 10))
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Load images and styles for this message only")
+                    .accessibilityLabel("Load remote content for this message")
                 }
-                .foregroundStyle(.tertiary)
-                .help("Remote images blocked to prevent read tracking")
             }
             Spacer()
             if let label = positionLabel {

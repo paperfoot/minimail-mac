@@ -18,6 +18,10 @@ struct HTMLBodyView: View {
     /// Pre-wrapped HTML. Computed in `init` so the costly `wrap` + quote
     /// transform doesn't re-run on every SwiftUI update.
     private let wrappedHTML: String
+    /// External opt-in: the reader footer flips this to true when the user
+    /// hits "Load remote content" for the currently-shown message. We DO
+    /// NOT persist across messages — see `onChange(of: wrappedHTML)` below.
+    private let remoteContentAllowed: Bool
     /// Measured natural height after the page renders. Seeded with a small
     /// non-zero placeholder so the view doesn't collapse before the first
     /// measurement comes back.
@@ -28,8 +32,9 @@ struct HTMLBodyView: View {
     /// and tracking pixels in incoming mail.
     @State private var rulesFailed: Bool = false
 
-    init(html: String) {
+    init(html: String, remoteContentAllowed: Bool = false) {
         self.wrappedHTML = HTMLWebView.wrap(html)
+        self.remoteContentAllowed = remoteContentAllowed
     }
 
     var body: some View {
@@ -53,6 +58,7 @@ struct HTMLBodyView: View {
             } else {
                 HTMLWebView(
                     wrappedHTML: wrappedHTML,
+                    remoteContentAllowed: remoteContentAllowed,
                     height: $measuredHeight,
                     rulesFailed: $rulesFailed
                 )
@@ -78,6 +84,11 @@ private struct HTMLWebView: NSViewRepresentable {
     /// parent `HTMLBodyView.init`, not here, so a reused WebView on a
     /// downstream invalidation doesn't pay the wrap cost again.
     let wrappedHTML: String
+    /// When true, detach the content-blocking rule list (so remote images,
+    /// stylesheets, fonts render) and reload the wrapped HTML. Per-message
+    /// opt-in only — the parent resets it to false whenever the HTML
+    /// changes so the choice never leaks to the next message.
+    let remoteContentAllowed: Bool
     @Binding var height: CGFloat
     /// Set true if the shared content-blocking rule list fails to compile.
     /// Parent uses this to swap the web view out for a fail-closed banner
@@ -105,7 +116,16 @@ private struct HTMLWebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
 
-        Self.attachRuleList(to: webView, coordinator: context.coordinator)
+        if remoteContentAllowed {
+            // Opt-in path: user already clicked "Load remote content" before
+            // the webview was materialised (unusual but possible under
+            // rapid j/k navigation). Skip attaching the blocklist entirely
+            // and mark the coordinator ready so the HTML loads immediately.
+            context.coordinator.rulesReady = true
+            context.coordinator.remoteContentAllowed = true
+        } else {
+            Self.attachRuleList(to: webView, coordinator: context.coordinator)
+        }
         // Defer until next runloop tick — the internal scroll view isn't
         // attached to the view hierarchy until after `makeNSView` returns.
         DispatchQueue.main.async { [weak webView] in
@@ -116,6 +136,21 @@ private struct HTMLWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        // Opt-in flip: if the user just allowed remote content, strip the
+        // rule list off THIS webview, mark the coordinator's state so it
+        // doesn't re-attach, then reload the HTML so previously-blocked
+        // images/styles/fonts actually request bytes.
+        if remoteContentAllowed && !context.coordinator.remoteContentAllowed {
+            webView.configuration.userContentController.removeAllContentRuleLists()
+            context.coordinator.remoteContentAllowed = true
+            context.coordinator.rulesReady = true
+            // Force a reload of the currently-displayed HTML by clearing
+            // the dedup key — flushPending will rerun loadHTMLString below.
+            context.coordinator.lastLoadedHTML = nil
+            context.coordinator.pendingHTML = wrappedHTML
+            context.coordinator.flushPending()
+            return
+        }
         if context.coordinator.lastLoadedHTML == wrappedHTML { return }
         context.coordinator.pendingHTML = wrappedHTML
         if context.coordinator.rulesReady {
@@ -220,12 +255,31 @@ private struct HTMLWebView: NSViewRepresentable {
         var rulesReady = false
         var pendingHTML: String?
         var lastLoadedHTML: String?
+        /// Mirror of the parent's `remoteContentAllowed` so we don't re-
+        /// strip the blocklist on every SwiftUI invalidation wave — only
+        /// on the transition from false → true.
+        var remoteContentAllowed = false
 
         init(parent: HTMLWebView) { self.parent = parent }
 
         func flushPending() {
             guard let html = pendingHTML, let webView else { return }
-            webView.loadHTMLString(html, baseURL: nil)
+            // When the user has opted into remote content for this message,
+            // inject a style override so the belt-and-braces
+            // `img[src^="http"] { display: none }` CSS stops hiding images.
+            // The WKContentRuleList has already been removed by the caller.
+            let payload: String
+            if remoteContentAllowed {
+                let override = "<style>img[src^=\"http\"], img[src^=\"https\"] { display: inline !important; }</style>"
+                if let headEnd = html.range(of: "</head>") {
+                    payload = html.replacingCharacters(in: headEnd, with: override + "</head>")
+                } else {
+                    payload = override + html
+                }
+            } else {
+                payload = html
+            }
+            webView.loadHTMLString(payload, baseURL: nil)
             lastLoadedHTML = html
             pendingHTML = nil
         }
@@ -304,6 +358,13 @@ private struct HTMLWebView: NSViewRepresentable {
     /// Wrap raw email HTML with our style boilerplate + quote-collapse
     /// transform. Called ONCE from `HTMLBodyView.init`, not from
     /// `updateNSView`. `fileprivate` so the parent view's init can reach it.
+    ///
+    /// `img[src^="http"]` is hidden via CSS here as a second line of
+    /// defence on top of the WKContentRuleList — even if the rule list
+    /// fails to load in time, remote images don't flash into view. When
+    /// the user opts in via "Load remote content", the caller strips the
+    /// rule list AND injects a small style override at the bottom of the
+    /// DOM via evaluateJavaScript to re-enable display (see `flushPending`).
     fileprivate static func wrap(_ body: String) -> String {
         let prefersDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let fg = prefersDark ? "#f5f5f7" : "#1d1d1f"
