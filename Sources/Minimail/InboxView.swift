@@ -255,6 +255,21 @@ struct InboxView: View {
     private var regularList: some View {
         let visible = state.inbox.visible()
         let groups = DayGrouping.group(visible)
+        // Pre-flatten the group/row index into a dict so per-row lookup is
+        // O(1) instead of `DayGrouping.globalIndex`'s O(N²) nested scan
+        // (called once per row per render = ~N² comparisons per inbox
+        // re-render at N=100). Rebuilt once per render of regularList.
+        let indexMap: [Int64: Int] = {
+            var map: [Int64: Int] = [:]
+            var idx = 0
+            for group in groups {
+                for msg in group.messages {
+                    map[msg.id] = idx
+                    idx += 1
+                }
+            }
+            return map
+        }()
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
@@ -264,7 +279,7 @@ struct InboxView: View {
                         ForEach(groups, id: \.label) { group in
                             Section {
                                 ForEach(group.messages) { msg in
-                                    let globalIdx = DayGrouping.globalIndex(of: msg, in: groups)
+                                    let globalIdx = indexMap[msg.id] ?? 0
                                     MessageRow(
                                         message: msg,
                                         isSelected: state.reader.loaded?.id == msg.id,

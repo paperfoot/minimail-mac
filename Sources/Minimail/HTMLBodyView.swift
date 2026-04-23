@@ -8,18 +8,27 @@ import SwiftUI
 /// view: the inner WKWebView no longer scrolls, the outer SwiftUI ScrollView
 /// does the scrolling for the entire thread.
 ///
-/// Performance: the content-blocking rule list is compiled **once globally**
-/// (cached static) and reused across every WKWebView instance — opening a
-/// 3-message thread no longer pays the rule-list-compile cost three times.
+/// Performance:
+/// - The content-blocking rule list is compiled **once globally** (cached
+///   static) and reused across every WKWebView instance.
+/// - HTML wrapping (style boilerplate + quote-collapse transform) runs in
+///   the view's `init` — NOT in `updateNSView` — so a reused WKWebView
+///   doesn't re-wrap the same HTML on every observable invalidation wave.
 struct HTMLBodyView: View {
-    let html: String
+    /// Pre-wrapped HTML. Computed in `init` so the costly `wrap` + quote
+    /// transform doesn't re-run on every SwiftUI update.
+    private let wrappedHTML: String
     /// Measured natural height after the page renders. Seeded with a small
     /// non-zero placeholder so the view doesn't collapse before the first
     /// measurement comes back.
     @State private var measuredHeight: CGFloat = 80
 
+    init(html: String) {
+        self.wrappedHTML = HTMLWebView.wrap(html)
+    }
+
     var body: some View {
-        HTMLWebView(html: html, height: $measuredHeight)
+        HTMLWebView(wrappedHTML: wrappedHTML, height: $measuredHeight)
             .frame(height: measuredHeight)
     }
 }
@@ -28,7 +37,10 @@ struct HTMLBodyView: View {
 /// height back to the SwiftUI parent via a binding so the parent can resize
 /// itself instead of the web view scrolling internally.
 private struct HTMLWebView: NSViewRepresentable {
-    let html: String
+    /// Already-wrapped HTML. Wrapping (style + quote collapse) happens in the
+    /// parent `HTMLBodyView.init`, not here, so a reused WebView on a
+    /// downstream invalidation doesn't pay the wrap cost again.
+    let wrappedHTML: String
     @Binding var height: CGFloat
 
     func makeNSView(context: Context) -> WKWebView {
@@ -63,9 +75,8 @@ private struct HTMLWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        let wrapped = Self.wrap(html)
-        if context.coordinator.lastLoadedHTML == wrapped { return }
-        context.coordinator.pendingHTML = wrapped
+        if context.coordinator.lastLoadedHTML == wrappedHTML { return }
+        context.coordinator.pendingHTML = wrappedHTML
         if context.coordinator.rulesReady {
             context.coordinator.flushPending()
         }
@@ -159,12 +170,17 @@ private struct HTMLWebView: NSViewRepresentable {
         // After the page lays out, ask the document for its real scrollHeight
         // and feed that back to SwiftUI so the parent frame matches. This is
         // what makes the outer SwiftUI scroll view the *only* scroller.
+        //
+        // We measure twice: once immediately on didFinish, then once again
+        // AFTER the open spring animation settles (~0.35s for response=0.3).
+        // The second pass catches late layout shifts from font-glyph fallback
+        // that can arrive after didFinish. Moving the second pass out of the
+        // animation window means any height correction is invisible to the
+        // user (the reader is already fully open). Previous 100ms placement
+        // caused a visible height bump mid-animation.
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             measureHeight(in: webView)
-            // Layout sometimes changes after async font / image load even in
-            // our sanitised HTML (e.g. unicode glyph fallback). Re-measure
-            // briefly so the final height is correct.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.40) { [weak self] in
                 guard let self, let webView = self.webView else { return }
                 self.measureHeight(in: webView)
             }
@@ -212,7 +228,10 @@ private struct HTMLWebView: NSViewRepresentable {
 
     // ── HTML wrapping ────────────────────────────────────────────────────
 
-    private static func wrap(_ body: String) -> String {
+    /// Wrap raw email HTML with our style boilerplate + quote-collapse
+    /// transform. Called ONCE from `HTMLBodyView.init`, not from
+    /// `updateNSView`. `fileprivate` so the parent view's init can reach it.
+    fileprivate static func wrap(_ body: String) -> String {
         let prefersDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let fg = prefersDark ? "#f5f5f7" : "#1d1d1f"
         let link = "#0a84ff"

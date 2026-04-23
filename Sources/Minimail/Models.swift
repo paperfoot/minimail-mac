@@ -39,7 +39,10 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
     let in_reply_to: String?
     let references: [String]?
     let last_event: String?
-    let is_read: Bool?
+    /// `var` (not `let`) so we can flip read-state locally after the user
+    /// opens a message, without re-fetching the entire inbox list from the
+    /// CLI. Keeps the reader→open animation render-light.
+    var is_read: Bool?
     let created_at: String?
     let synced_at: String?
     let archived: Bool?
