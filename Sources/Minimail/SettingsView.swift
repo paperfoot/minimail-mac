@@ -100,17 +100,25 @@ struct SettingsView: View {
                 Text("To add another account, run this in Terminal:")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
+                // Use the bundled email-cli path so the command works for
+                // every widget install — not just users who happen to have
+                // email-cli on PATH via Homebrew or cargo. The full bundled
+                // path is ugly but reliable. When the user's shell PATH
+                // already has email-cli, `email-cli account add …` also
+                // works — both commands are equivalent.
+                let bundledCLI = "/Applications/Minimail.app/Contents/MacOS/email-cli"
+                let addCommand = "\"\(bundledCLI)\" account add you@your-domain.com"
                 HStack(spacing: 6) {
-                    Text("email-cli account add you@your-domain.com")
+                    Text(addCommand)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .lineLimit(1)
-                        .truncationMode(.tail)
+                        .truncationMode(.middle)
                     Spacer(minLength: 4)
                     Button {
                         let pb = NSPasteboard.general
                         pb.clearContents()
-                        pb.setString("email-cli account add you@your-domain.com", forType: .string)
+                        pb.setString(addCommand, forType: .string)
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .font(.system(size: 10))
