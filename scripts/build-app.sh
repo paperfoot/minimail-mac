@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Builds Minimail and packages it as a proper .app bundle with the
-# email-cli helper binary embedded in Contents/Resources so the shipped
-# app works without any external dependency.
+# email-cli helper binary embedded in Contents/MacOS so the shipped
+# app works without any external dependency. Helper placement matches
+# Apple's Bundle Programming Guide — auxiliary executables live in
+# Contents/MacOS alongside the main binary, never in Contents/Resources.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -50,8 +52,8 @@ if [ -f Resources/AppIcon.icns ]; then
     echo "   embedded AppIcon.icns"
 fi
 if [ -n "${EMAIL_CLI}" ]; then
-    cp "${EMAIL_CLI}" "${APP_DIR}/Contents/Resources/email-cli"
-    chmod +x "${APP_DIR}/Contents/Resources/email-cli"
+    cp "${EMAIL_CLI}" "${APP_DIR}/Contents/MacOS/email-cli"
+    chmod +x "${APP_DIR}/Contents/MacOS/email-cli"
     echo "   embedded email-cli from ${EMAIL_CLI}"
 fi
 
@@ -67,11 +69,11 @@ if [ -n "${SIGNING_IDENTITY:-}" ]; then
         echo "✗ missing entitlements file: ${ENTITLEMENTS}" >&2
         exit 1
     fi
-    if [ -f "${APP_DIR}/Contents/Resources/email-cli" ]; then
+    if [ -f "${APP_DIR}/Contents/MacOS/email-cli" ]; then
         codesign --force --timestamp --options runtime \
             --entitlements "${ENTITLEMENTS}" \
             --sign "${SIGNING_IDENTITY}" \
-            "${APP_DIR}/Contents/Resources/email-cli"
+            "${APP_DIR}/Contents/MacOS/email-cli"
     fi
     codesign --force --timestamp --options runtime \
         --entitlements "${ENTITLEMENTS}" \
@@ -81,8 +83,8 @@ if [ -n "${SIGNING_IDENTITY:-}" ]; then
     codesign --verify --strict --verbose=2 "${APP_DIR}"
 else
     echo "▸ ad-hoc codesigning (dev build; set SIGNING_IDENTITY for Developer ID)"
-    if [ -f "${APP_DIR}/Contents/Resources/email-cli" ]; then
-        codesign --force --sign - "${APP_DIR}/Contents/Resources/email-cli"
+    if [ -f "${APP_DIR}/Contents/MacOS/email-cli" ]; then
+        codesign --force --sign - "${APP_DIR}/Contents/MacOS/email-cli"
     fi
     codesign --force --deep --sign - "${APP_DIR}"
 fi

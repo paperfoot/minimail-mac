@@ -53,8 +53,11 @@ actor EmailCLI {
     func locate() async -> String? {
         if let cached = binaryPath { return cached }
 
-        // 1) Bundled helper — shipped inside Minimail.app/Contents/Resources.
-        if let bundleURL = Bundle.main.url(forResource: "email-cli", withExtension: nil),
+        // 1) Bundled helper — shipped inside Minimail.app/Contents/MacOS
+        // (Apple Bundle Programming Guide: auxiliary executables live in
+        // Contents/MacOS, not Contents/Resources, and url(forAuxiliaryExecutable:)
+        // is the matching lookup API).
+        if let bundleURL = Bundle.main.url(forAuxiliaryExecutable: "email-cli"),
            FileManager.default.isExecutableFile(atPath: bundleURL.path) {
             binaryPath = bundleURL.path
             return bundleURL.path
