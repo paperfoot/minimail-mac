@@ -308,6 +308,11 @@ struct ComposeView: View {
                 ForEach(state.session.accounts) { acct in
                     Button {
                         state.compose.fromOverride = acct
+                        // Persist the sender change — without this, picking
+                        // a new From on an existing draft was in-memory-only
+                        // until the user typed another character. Reopen
+                        // before that restored the old account.
+                        state.scheduleAutosave()
                     } label: {
                         if acct.email == resolvedEmail {
                             Label(acct.email, systemImage: "checkmark")
