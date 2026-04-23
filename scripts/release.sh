@@ -170,10 +170,14 @@ notarize_or_die() {
     local log_file
     log_file=$(mktemp -t minimail-notary-log.XXXXXX)
     if xcrun notarytool log "${id}" --keychain-profile "${NOTARY_PROFILE}" > "${log_file}" 2>/dev/null; then
-        # issues[] is empty on a clean notarization; if present, print a digest.
-        if grep -q '"issues"' "${log_file}" && ! grep -q '"issues" *: *\[\]' "${log_file}"; then
-            echo "   ⚠ notarization log has issues (first 20 lines):" >&2
-            head -20 "${log_file}" >&2
+        # A clean log has "issues": null. Each actual issue is an object
+        # containing "severity", which only appears inside issues entries —
+        # makes it a robust sentinel regardless of null vs [] vs omitted.
+        if grep -q '"severity"' "${log_file}"; then
+            local issue_count
+            issue_count=$(grep -c '"severity"' "${log_file}")
+            echo "   ⚠ notarization log has ${issue_count} issue(s):" >&2
+            grep -E '"(severity|message|path)"' "${log_file}" >&2
         fi
     fi
     rm -f "${log_file}"
