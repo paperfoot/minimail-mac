@@ -189,7 +189,11 @@ struct ComposeView: View {
             try png.write(to: url)
             state.addAttachment(url)
         } catch {
-            state.compose.error = "Couldn't save pasted image: \(error.localizedDescription)"
+            // Route through ActionableError so the compose error row shows
+            // a classified, redacted message rather than raw POSIX errno
+            // text with the temp path leaked in.
+            let actionable = ActionableError.classify(error)
+            state.compose.error = "Couldn't save pasted image: \(actionable.message)"
         }
     }
 

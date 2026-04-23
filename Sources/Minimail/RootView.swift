@@ -234,7 +234,10 @@ struct OnboardingView: View {
             // inbox automatically if at least one account is present now.
             await state.bootstrap()
         } catch {
-            errorText = error.localizedDescription
+            // Classify before surfacing so onboarding shows the same
+            // redacted, user-friendly message the rest of the app uses
+            // (e.g. "Invalid API key" instead of raw Resend HTTP error).
+            errorText = ActionableError.classify(error).message
         }
     }
 }

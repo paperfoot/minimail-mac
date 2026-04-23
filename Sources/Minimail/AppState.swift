@@ -620,7 +620,10 @@ final class AppState {
                 self.updateReaderDerived(for: detail)
             } catch {
                 if Task.isCancelled { return }
-                self.reader.error = error.localizedDescription
+                // Route through ActionableError so the reader shows a
+                // redacted, human-readable message (e.g. "Rate limited —
+                // retry in 30s" instead of raw stderr with URLs + tokens).
+                self.reader.error = ActionableError.classify(error).message
                 self.reader.isLoading = false
                 return
             }
@@ -957,7 +960,12 @@ final class AppState {
             try await cli.downloadAttachment(messageID: messageID, attachmentID: attachment.id, to: destination)
             NSWorkspace.shared.activateFileViewerSelecting([destination])
         } catch {
-            inbox.error = .other("Attachment download failed: \(error.localizedDescription)")
+            // Route through the shared classifier so a rate-limit / auth
+            // error from the underlying download surfaces as the same
+            // actionable case the rest of the app already handles, rather
+            // than a bare stderr blob.
+            let actionable = ActionableError.classify(error)
+            inbox.error = .other("Attachment download failed: \(actionable.message)")
         }
     }
 
@@ -1514,10 +1522,12 @@ final class AppState {
     }
 
     /// Map EmailCLI errors to user-facing copy that mentions what went wrong
-    /// and hints at what to fix. Unknown errors fall back to localizedDescription.
+    /// and hints at what to fix. Unknown errors fall back to the same
+    /// ActionableError classifier the rest of the app uses, so nothing
+    /// leaks raw stderr URLs / tokens to the banner.
     static func describeSendError(_ error: Error) -> String {
         guard let cliError = error as? EmailCLI.CLIError else {
-            return "Send failed: \(error.localizedDescription)"
+            return "Send failed: \(ActionableError.classify(error).message)"
         }
         switch cliError {
         case .configError(let stderr):
