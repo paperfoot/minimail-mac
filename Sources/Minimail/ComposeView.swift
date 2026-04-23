@@ -290,7 +290,13 @@ struct ComposeView: View {
     }
 
     private var fromRow: some View {
-        HStack(spacing: 10) {
+        // Resolved sender — fromOverride wins, else composeFromAccount.
+        // Picking a different From in the dropdown sets fromOverride only;
+        // it does NOT change the inbox view (so an All-Accounts user can
+        // pick a sender without leaving the unified inbox).
+        let resolved = state.compose.fromOverride ?? state.composeFromAccount
+        let resolvedEmail = resolved?.email ?? "No account"
+        return HStack(spacing: 10) {
             Text("From")
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
@@ -298,9 +304,9 @@ struct ComposeView: View {
             Menu {
                 ForEach(state.session.accounts) { acct in
                     Button {
-                        state.session.currentAccount = acct
+                        state.compose.fromOverride = acct
                     } label: {
-                        if acct.email == state.session.currentAccount?.email {
+                        if acct.email == resolvedEmail {
                             Label(acct.email, systemImage: "checkmark")
                         } else {
                             Text(acct.email)
@@ -309,8 +315,8 @@ struct ComposeView: View {
                 }
             } label: {
                 HStack(spacing: 6) {
-                    AccountAvatar(email: state.session.currentAccount?.email ?? "?")
-                    Text(state.session.currentAccount?.email ?? "No account")
+                    AccountAvatar(email: resolvedEmail)
+                    Text(resolvedEmail)
                         .font(.system(size: 12))
                         .foregroundStyle(.primary)
                     Image(systemName: "chevron.down")
@@ -414,11 +420,14 @@ struct ComposeView: View {
         .padding(.vertical, 8)
     }
 
-    /// Muted preview of what the current account's signature will add to
+    /// Muted preview of what the resolved sender's signature will add to
     /// the outgoing message. Nil/empty signature hides the row entirely.
+    /// Reads from `composeFromAccount` (or `fromOverride`) so the preview
+    /// stays correct even in All-Accounts mode where currentAccount is nil.
     @ViewBuilder
     private var signaturePreview: some View {
-        if let sig = state.session.currentAccount?.signature,
+        let sender = state.compose.fromOverride ?? state.composeFromAccount
+        if let sig = sender?.signature,
            !sig.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 Divider().opacity(0.1)
