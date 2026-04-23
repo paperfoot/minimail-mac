@@ -361,6 +361,40 @@ actor EmailCLI {
         _ = try await runRaw(args: args + ["--json"])
     }
 
+    // ── Outbox (durable send queue) ───────────────────────────────────────
+    //
+    // The Rust side persists every queued send to an `outbox` table with a
+    // status of pending/sent/failed. `outbox flush` retries pending; `outbox
+    // retry <id>` re-runs a specific failed row. Surfacing these to the UI
+    // lets us show "your message is stuck here, click to retry" instead of
+    // flashing an error toast that disappears forever. (ritalin O-021)
+
+    /// Every row in the local outbox (pending + failed + sent). Optionally
+    /// filter to one account — unified inbox passes nil and gets the lot.
+    /// NB: the CLI's `outbox list` subcommand today does not accept an
+    /// `--account` flag, so filtering happens client-side. Keeping the
+    /// parameter in the signature so we can wire it to a future --account
+    /// flag without another Swift breakage.
+    func outboxList(account: String? = nil) async throws -> [OutboxEntry] {
+        let entries = try await runJSON(args: ["outbox", "list", "--json"], as: [OutboxEntry].self)
+        guard let account else { return entries }
+        return entries.filter { $0.account_email == account }
+    }
+
+    /// Retry one failed outbox entry by its row id. CLI writes back the new
+    /// status; we ignore the payload and let the caller re-list.
+    func outboxRetry(id: String) async throws {
+        _ = try await runRaw(args: ["outbox", "retry", id, "--json"])
+    }
+
+    /// Sweep every `pending` row and try to deliver it. Returns the sent +
+    /// failed counts from `{sent: N, failed: N}`. Failed rows stay put for
+    /// later manual retry via `outboxRetry`.
+    func outboxFlush() async throws -> (sent: Int, failed: Int) {
+        let resp = try await runJSON(args: ["outbox", "flush", "--json"], as: OutboxFlushResponse.self)
+        return (sent: resp.sent, failed: resp.failed)
+    }
+
     /// Resolve the List-Unsubscribe header on a message into a URL (or
     /// mailto:) the UI can open in the user's browser.
     func unsubscribeURL(messageID: Int64) async throws -> String {

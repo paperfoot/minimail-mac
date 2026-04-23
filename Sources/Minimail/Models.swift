@@ -154,3 +154,26 @@ struct UnsubscribeResponse: Decodable, Sendable {
     let url: String
     let raw_header: String?
 }
+
+/// One row from `email-cli outbox list --json`. Wire-format matches the
+/// anonymous struct in `email-cli/src/commands/outbox.rs::outbox_list`.
+/// The outbox persists every queued send so failures stay visible + retryable
+/// across restarts — the Swift layer uses this to surface a recovery banner
+/// instead of silently dropping messages on transport errors.
+struct OutboxEntry: Decodable, Sendable, Identifiable, Hashable {
+    let id: String
+    let account_email: String
+    let status: String
+    let attempts: Int64
+    let last_error: String?
+    let created_at: String?
+
+    var isFailed: Bool { status == "failed" }
+    var isPending: Bool { status == "pending" }
+}
+
+/// Return shape of `email-cli outbox flush --json`.
+struct OutboxFlushResponse: Decodable, Sendable {
+    let sent: Int
+    let failed: Int
+}
