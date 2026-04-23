@@ -42,15 +42,23 @@ private struct HTMLWebView: NSViewRepresentable {
         config.defaultWebpagePreferences = prefs
         config.websiteDataStore = .nonPersistent()
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        // PassthroughWebView's scrollWheel forwards every event to the next
+        // responder so the outer SwiftUI ScrollView always wins. Combined
+        // with disabling the internal NSScrollView's elastic bounce (below),
+        // this keeps wheel scrolling smooth even when the cursor is over
+        // the email body for the entire viewport.
+        let webView = PassthroughWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
 
-        // Install the cached rule list (compiled once globally). If it's not
-        // ready yet, queue the first HTML load until it is — same race-fix
-        // pattern as the previous implementation.
         Self.attachRuleList(to: webView, coordinator: context.coordinator)
+        // Defer until next runloop tick — the internal scroll view isn't
+        // attached to the view hierarchy until after `makeNSView` returns.
+        DispatchQueue.main.async { [weak webView] in
+            guard let webView else { return }
+            Self.disableInternalElasticity(in: webView)
+        }
         return webView
     }
 
@@ -72,6 +80,25 @@ private struct HTMLWebView: NSViewRepresentable {
     @MainActor private static var cachedRuleList: WKContentRuleList?
     @MainActor private static var rulesPending: [(WKContentRuleList?) -> Void] = []
     @MainActor private static var compileStarted = false
+
+    /// Walk the WKWebView's subview tree, find the private internal
+    /// `NSScrollView`, and disable elastic bouncing in both axes. This is
+    /// what keeps the inner scroll view from rubber-band-consuming wheel
+    /// events when the (overflow:hidden) page can't actually scroll. Also
+    /// hides the inner scroller for safety.
+    @MainActor
+    private static func disableInternalElasticity(in webView: WKWebView) {
+        func walk(_ view: NSView) {
+            if let scroll = view as? NSScrollView {
+                scroll.verticalScrollElasticity = .none
+                scroll.horizontalScrollElasticity = .none
+                scroll.hasVerticalScroller = false
+                scroll.hasHorizontalScroller = false
+            }
+            for sv in view.subviews { walk(sv) }
+        }
+        walk(webView)
+    }
 
     @MainActor
     private static func attachRuleList(to webView: WKWebView, coordinator: Coordinator) {
@@ -241,6 +268,20 @@ private struct HTMLWebView: NSViewRepresentable {
         </style></head>
         <body>\(transformed)</body></html>
         """
+    }
+
+    // ── Subclass: forward wheel events ──────────────────────────────────
+
+    /// WKWebView subclass whose `scrollWheel(with:)` forwards every wheel
+    /// event up the responder chain rather than handling it locally. We
+    /// size our SwiftUI parent's frame to the page's natural content
+    /// height (see `HTMLBodyView`), so the web view never has anything to
+    /// scroll — letting the parent SwiftUI ScrollView always win means the
+    /// user can scroll the entire reader regardless of where the cursor is.
+    final class PassthroughWebView: WKWebView {
+        override func scrollWheel(with event: NSEvent) {
+            nextResponder?.scrollWheel(with: event)
+        }
     }
 
     /// Wrap every top-level blockquote in a `<details>` so the quoted reply
