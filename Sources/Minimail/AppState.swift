@@ -467,6 +467,34 @@ final class AppState {
         }
     }
 
+    /// Open a message by id — used by notification click-through. Prefers the
+    /// in-memory list row (synchronous, avoids a round-trip for common case)
+    /// but falls through to a raw reader-route + lazy body fetch when the
+    /// message isn't currently loaded. The second branch used to just flip
+    /// the route and leave `reader.loaded == nil`, producing a blank reader
+    /// shell until the user navigated back and forward. Now it seeds reader
+    /// state correctly, triggers `loadFullMessage` to pull the body, and
+    /// mirrors the in-place mark-read mutation from `open(message:)` (commit
+    /// 69585db) so the unread badge updates without a full refresh.
+    func openMessage(id: Int64) {
+        if let msg = inbox.messages.first(where: { $0.id == id }) {
+            open(message: msg)
+            return
+        }
+        reader.loaded = nil
+        if reader.error != nil { reader.error = nil }
+        router.currentView = .reader(id)
+        loadFullMessage(id: id)
+        Task { [weak self, id] in
+            try? await self?.cli.markRead(ids: [id])
+            guard let self else { return }
+            if let idx = self.inbox.messages.firstIndex(where: { $0.id == id }) {
+                self.inbox.messages[idx].is_read = true
+            }
+            self.inbox.totalUnread = max(0, self.inbox.totalUnread - 1)
+        }
+    }
+
     /// Refresh cached reader-footer values when navigating to a message.
     /// Called once per `open()` — avoids per-render `inbox.visible()` filter
     /// and per-render `NSRegularExpression` compile in the footer.

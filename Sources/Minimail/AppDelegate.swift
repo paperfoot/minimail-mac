@@ -111,11 +111,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         if !popover.isShown { showPopover() }
         guard let id = messageID else { return }
-        if let msg = appState.inbox.messages.first(where: { $0.id == id }) {
-            appState.open(message: msg)
-        } else {
-            appState.router.currentView = .reader(id)
-        }
+        // Delegated to AppState.openMessage(id:) — handles both the "already
+        // in the inbox list" and "route to reader + lazy-load body" cases,
+        // plus mirrors the in-place mark-read mutation used by
+        // open(message:). Previously the else-branch only changed the route,
+        // so the reader would mount with reader.loaded == nil and render an
+        // empty shell until the user navigated away and back.
+        appState.openMessage(id: id)
     }
 
     private func observeUnread() {
