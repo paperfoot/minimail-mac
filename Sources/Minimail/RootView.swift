@@ -47,6 +47,15 @@ struct RootView: View {
                     .padding(.bottom, 12)
                     .padding(.horizontal, 16)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if state.lastFailedSend != nil {
+                // Send failed after the undo window — the message is in the
+                // Rust outbox table under status='failed', not lost. Offer
+                // Retry + Edit so the user has a path back. Phase-3 adds a
+                // full outbox-management UI; for now the banner is enough.
+                OutboxRecoveryBanner()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             } else if let status = state.transientStatus {
                 TransientStatusToast(status: status)
                     .padding(.bottom, 12)
@@ -325,6 +334,54 @@ struct TransientStatusToast: View {
         case .deleted(let count): return count == 1 ? "Deleted" : "Deleted \(count)"
         case .info(let text): return text
         }
+    }
+}
+
+/// Recovery banner shown when a send failed after the undo window expired.
+/// The message is NOT lost — the Rust outbox table has it under
+/// status='failed' — but the user had no path back before this banner
+/// landed. Retry re-queues the snapshot; Edit repopulates compose so they
+/// can fix e.g. a bad recipient. Dismiss drops the in-memory affordance;
+/// the outbox row stays for a future "Sent → Stuck mail" UI. Style matches
+/// the existing toasts (capsule, glass, system edges) so it feels like part
+/// of the family — Phase 3 gets the richer outbox manager.
+struct OutboxRecoveryBanner: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            Text("Send failed — message kept in outbox")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Spacer()
+            Button("Retry") { Task { await state.retryLastFailedSend() } }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(Color.accentColor.opacity(0.15), in: Capsule())
+            Button("Edit") { state.editLastFailedSend() }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Button {
+                state.dismissLastFailedSend()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss — the message stays in the outbox for later retry")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassToastBackground()
     }
 }
 
