@@ -301,6 +301,17 @@ final class AppState {
     var transientStatus: TransientStatus?
     private var transientClearTask: Task<Void, Never>?
 
+    /// Last send that failed after the undo window expired. Kept in memory so
+    /// the UI can render a recovery banner with Retry + Edit buttons. Cleared
+    /// on successful retry or when the user explicitly edits. The payload is
+    /// also persisted in the Rust outbox table under `status = 'failed'` —
+    /// `lastFailedSend` is the in-memory mirror that survives as long as the
+    /// popover stays open.
+    var lastFailedSend: PendingSend?
+    /// Cached view of the outbox after a send failure — avoids a CLI round
+    /// trip every time the banner re-renders.
+    var lastOutboxSnapshot: [OutboxEntry] = []
+
     /// Undo window (seconds). Matches Gmail's max.
     static let undoSendWindow: TimeInterval = 10
 
@@ -1284,16 +1295,28 @@ final class AppState {
             }
             pendingSend = nil
             pendingSendTask = nil
+            // Successful send clears any stale failure affordance from a
+            // previous attempt — the banner was about that attempt, not this
+            // one.
+            lastFailedSend = nil
+            lastOutboxSnapshot = []
             flashStatus(.sent)
             await refreshInbox(pull: false)
             if inbox.currentFolder == .drafts { await refreshDrafts() }
         } catch {
-            pendingSend = nil
+            // Keep the snapshot accessible via `lastFailedSend` so the
+            // outboxBanner in RootView can offer Retry / Edit. The old
+            // implementation nilled `pendingSend` and flashed an error that
+            // disappeared — the message felt "lost" even though email-cli
+            // had persisted it in the outbox table. (ritalin O-022)
             pendingSendTask = nil
-            // The CLI encodes rate-limit / bad-key / missing-config failures
-            // as typed errors. Use those directly when they match; otherwise
-            // fall back to the send-specific preamble so the banner doesn't
-            // just say "failed" with no context.
+            pendingSend = nil
+            lastFailedSend = snap
+            // Snapshot the outbox so the banner can show the matching failed
+            // row (status + attempts + last_error). Best-effort: a failure to
+            // list the outbox isn't itself surface-worthy — the banner still
+            // works off `lastFailedSend`.
+            lastOutboxSnapshot = (try? await cli.outboxList(account: snap.from)) ?? []
             let classified = ActionableError.classify(error)
             if case .other = classified {
                 inbox.error = .other(Self.describeSendError(error))
@@ -1302,6 +1325,71 @@ final class AppState {
             }
             Log.send.error("send failed: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    /// Re-queue the last failed send as a fresh pendingSend and fire it
+    /// immediately. Matches "Retry" on the recovery banner.
+    func retryLastFailedSend() async {
+        guard let snap = lastFailedSend else { return }
+        lastFailedSend = nil
+        lastOutboxSnapshot = []
+        // Keep the deadline in the past so firePendingSend runs right away
+        // rather than re-arming the 10s undo window (the user already
+        // explicitly chose to retry).
+        let requeued = PendingSend(
+            from: snap.from, to: snap.to, cc: snap.cc, bcc: snap.bcc,
+            subject: snap.subject, text: snap.text, html: snap.html,
+            attachments: snap.attachments,
+            replyToMessageID: snap.replyToMessageID,
+            originalDraftID: snap.originalDraftID,
+            queuedAt: Date(),
+            deadline: Date()
+        )
+        pendingSend = requeued
+        await firePendingSend()
+    }
+
+    /// Restore the failed snapshot back into the compose view so the user can
+    /// edit before retrying (fix the bad address, reword, etc.). Matches
+    /// "Edit" on the recovery banner.
+    func editLastFailedSend() {
+        guard let snap = lastFailedSend else { return }
+        lastFailedSend = nil
+        lastOutboxSnapshot = []
+        compose.clear()
+        compose.to = snap.to.joined(separator: ", ")
+        compose.cc = snap.cc.joined(separator: ", ")
+        compose.bcc = snap.bcc.joined(separator: ", ")
+        compose.subject = snap.subject
+        // Prefer HTML round-trip when the snapshot has it so bold/italic/links
+        // survive the recovery path — matches undoPendingSend's rich-text
+        // restore. Falls back to plain text.
+        if let html = snap.html, let data = html.data(using: .utf8),
+           let attr = try? NSAttributedString(
+               data: data,
+               options: [.documentType: NSAttributedString.DocumentType.html,
+                         .characterEncoding: String.Encoding.utf8.rawValue],
+               documentAttributes: nil
+           ) {
+            compose.bodyAttributed = attr
+        } else {
+            compose.body = snap.text ?? ""
+        }
+        compose.attachments = snap.attachments
+        compose.replyToID = snap.replyToMessageID
+        compose.editingDraftID = snap.originalDraftID
+        if let fromEmail = snap.from {
+            compose.fromOverride = session.accounts.first { $0.email == fromEmail }
+        }
+        router.currentView = .compose(snap.replyToMessageID)
+    }
+
+    /// User dismissed the banner without choosing. Drops the in-memory
+    /// snapshot; the Rust outbox row is still there and `outbox retry` via a
+    /// future Settings-side UI can surface it again.
+    func dismissLastFailedSend() {
+        lastFailedSend = nil
+        lastOutboxSnapshot = []
     }
 
     /// Map EmailCLI errors to user-facing copy that mentions what went wrong
