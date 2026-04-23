@@ -1431,7 +1431,24 @@ final class AppState {
         compose.cc = snap.cc.joined(separator: ", ")
         compose.bcc = snap.bcc.joined(separator: ", ")
         compose.subject = snap.subject
-        compose.body = snap.text ?? ""
+        // Rich-text undo: snapshot captures both the plain-text body and the
+        // HTML serialisation; the previous undo path dropped snap.html on the
+        // floor, so Bold/Italic/Underline/links vanished on Undo even though
+        // the send was still queued. Rehydrating from HTML when it's present
+        // preserves every formatting run. Falls back to plain text for
+        // messages the user sent without any formatting (bodyHTML is nil in
+        // that case — see ComposeState.bodyContainsFormatting). (O-023)
+        if let html = snap.html, let data = html.data(using: .utf8),
+           let attr = try? NSAttributedString(
+               data: data,
+               options: [.documentType: NSAttributedString.DocumentType.html,
+                         .characterEncoding: String.Encoding.utf8.rawValue],
+               documentAttributes: nil
+           ) {
+            compose.bodyAttributed = attr
+        } else {
+            compose.body = snap.text ?? ""
+        }
         compose.attachments = snap.attachments
         compose.replyToID = snap.replyToMessageID
         compose.editingDraftID = snap.originalDraftID
