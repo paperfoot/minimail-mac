@@ -77,6 +77,8 @@ struct ComposeAttachmentChip: View {
                     .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
+            .help("Remove attachment")
+            .accessibilityLabel("Remove attachment \(url.lastPathComponent)")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
