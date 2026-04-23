@@ -18,6 +18,11 @@ struct InboxView: View {
             Divider().opacity(0.15)
             if let err = inbox.error {
                 ErrorBanner(error: err)
+            } else if let err = inbox.searchError {
+                // Surface FTS/search failures through the same channel as
+                // the generic inbox error — the user sees a classified,
+                // redacted message rather than raw CLI stderr.
+                ErrorBanner(error: err)
             }
             messageList
             footer
@@ -158,6 +163,17 @@ struct InboxView: View {
             TextField("Search", text: bound)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
+                // Free-text search only for the widget (per product-split.md
+                // — operator parsing like from:/is:unread ships with the
+                // full app). Each keystroke reschedules the 300ms debounce.
+                .onChange(of: bound.wrappedValue) { _, _ in
+                    state.scheduleSearch()
+                }
+            if state.inbox.isSearching {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.7)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)

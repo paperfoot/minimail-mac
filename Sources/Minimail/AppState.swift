@@ -53,31 +53,45 @@ final class InboxState {
     /// surfaces the bulk-action bar at the top of the list.
     var selection: Set<Int64> = []
 
+    // ── Search (FTS-backed via cli.search) ───────────────────────────────
+    //
+    // Free-text search that reaches across the entire mailbox via the
+    // CLI's FTS5 index — not just the ~100 rows currently loaded in
+    // `messages`. When `searchQuery` is non-empty and a search run has
+    // completed, `visible()` returns `searchResults` instead of the
+    // folder-filtered slice. The widget's scope is deliberately free-text
+    // only; operator parsing (`from:`, `is:unread`, …) belongs in the
+    // future full app (see product-split.md).
+    var searchResults: [Message] = []
+    var isSearching: Bool = false
+    var searchError: ActionableError?
+
     func visible() -> [Message] {
-        let base: [Message]
+        // When the user is searching, bypass the folder filter entirely and
+        // render `searchResults`. The CLI's FTS5 index covers the whole
+        // mailbox, not just the 100 rows we keep in `messages`, so a query
+        // for "invoice from 2023" actually finds things. Empty query →
+        // original folder-filtered list (the common glanceable case).
+        let trimmedQuery = searchQuery.trimmingCharacters(in: .whitespaces)
+        if !trimmedQuery.isEmpty {
+            return searchResults
+        }
         switch currentFolder {
         case .inbox:
             // Hide currently-snoozed messages from the main inbox.
-            base = messages.filter {
+            return messages.filter {
                 $0.direction == "received" && !$0.isArchived && !$0.isSnoozed
             }
         case .starred:
-            base = messages.filter { $0.isStarred && !$0.isArchived }
+            return messages.filter { $0.isStarred && !$0.isArchived }
         case .snoozed:
-            base = snoozedMessages.filter { $0.isSnoozed }
+            return snoozedMessages.filter { $0.isSnoozed }
         case .sent:
-            base = messages.filter { $0.direction == "sent" }
+            return messages.filter { $0.direction == "sent" }
         case .drafts:
-            base = []
+            return []
         case .archived:
-            base = messages.filter { $0.isArchived }
-        }
-        let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return base }
-        return base.filter { msg in
-            (msg.subject ?? "").lowercased().contains(q) ||
-            msg.from_addr.lowercased().contains(q) ||
-            (msg.text_preview ?? "").lowercased().contains(q)
+            return messages.filter { $0.isArchived }
         }
     }
 
@@ -325,6 +339,12 @@ final class AppState {
 
     /// Last archived IDs, for the "Undo" action on the archive toast.
     private var lastArchivedIDs: [Int64] = []
+
+    /// Debounced search: `scheduleSearch()` cancels the previous pending
+    /// task and schedules a new one 300ms out. `performSearch()` runs the
+    /// actual CLI round-trip. Task-cancellation through `searchDebounceTask`
+    /// means a fast typist doesn't fan out one CLI process per keystroke.
+    private var searchDebounceTask: Task<Void, Never>?
 
     private let cli = EmailCLI.shared
 
@@ -795,6 +815,69 @@ final class AppState {
         session.currentAccount = nil
         persistPreferredAccount()
         await refreshInbox(pull: false)
+    }
+
+    // ── Search ────────────────────────────────────────────────────────────
+
+    /// Debounced entry point: cancel any pending search task, schedule a new
+    /// one 300ms out. Called from the inbox TextField's onChange handler so
+    /// keystrokes fan-in into a single CLI round-trip rather than spawning
+    /// one process per character. If the user clears the query, we short-
+    /// circuit: cancel the in-flight search and fall back to the folder-
+    /// filtered list via `InboxState.visible()`.
+    func scheduleSearch() {
+        searchDebounceTask?.cancel()
+        let trimmed = inbox.searchQuery.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            // Clear-query path — reset search state so visible() routes back
+            // to the folder filter on the next render.
+            inbox.isSearching = false
+            inbox.searchError = nil
+            inbox.searchResults = []
+            return
+        }
+        searchDebounceTask = Task { [weak self] in
+            // 300ms debounce is short enough that typists barely notice,
+            // long enough that the CLI isn't hammered mid-word.
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+            await self?.performSearch()
+        }
+    }
+
+    /// Run a free-text search through the CLI's FTS5 index. Respects the
+    /// current account filter (nil = unified). Results drop straight into
+    /// `inbox.searchResults`; the view picks them up via `visible()`.
+    func performSearch() async {
+        let query = inbox.searchQuery.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else {
+            inbox.isSearching = false
+            inbox.searchResults = []
+            inbox.searchError = nil
+            return
+        }
+        inbox.isSearching = true
+        inbox.searchError = nil
+        defer { inbox.isSearching = false }
+        do {
+            let hits = try await cli.search(
+                query: query,
+                account: session.currentAccount?.email,
+                limit: 100
+            )
+            if Task.isCancelled { return }
+            // Only commit results if the query we searched for is still the
+            // user's current query — guards against a slow search run
+            // finishing after the user has already moved on or cleared the
+            // box. Without this you'd see stale hits flash in after clear.
+            if inbox.searchQuery.trimmingCharacters(in: .whitespaces) == query {
+                inbox.searchResults = hits
+            }
+        } catch {
+            if Task.isCancelled { return }
+            inbox.searchError = ActionableError.classify(error)
+            inbox.searchResults = []
+        }
     }
 
     /// Account to send from when composing. Mirrors `currentAccount` when
