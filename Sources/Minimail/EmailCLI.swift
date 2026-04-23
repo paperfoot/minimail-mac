@@ -237,6 +237,16 @@ actor EmailCLI {
         _ = try await runRaw(args: args)
     }
 
+    /// Eagerly download bytes for every attachment that doesn't yet have a
+    /// local copy. Resend's signed URLs expire and sometimes arrive as null
+    /// in the webhook payload — without this, attachments can silently become
+    /// unretrievable. Fire-and-forget after every sync.
+    func prefetchAttachments(account: String?) async throws {
+        var args = ["attachments", "prefetch", "--json"]
+        if let account { args += ["--account", account] }
+        _ = try await runRaw(args: args)
+    }
+
     func listDrafts(account: String?) async throws -> [Draft] {
         var args = ["draft", "list", "--json"]
         if let account { args += ["--account", account] }
