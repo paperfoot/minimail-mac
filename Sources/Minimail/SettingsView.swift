@@ -90,10 +90,39 @@ struct SettingsView: View {
                     }
                 }
             }
-            Text("Add or remove accounts via `email-cli account add/delete` in Terminal.")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .padding(.top, 2)
+            // Command is copy-pastable — monospaced, tappable to copy
+            // to the clipboard. Onboarding sends the user here for
+            // add-account help, so this needs to be friendly and
+            // unambiguous about what to run. Once the full app ships an
+            // in-app add/remove flow the Terminal path can retire.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("To add another account, run this in Terminal:")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    Text("email-cli account add you@your-domain.com")
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Button {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString("email-cli account add you@your-domain.com", forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy command")
+                    .accessibilityLabel("Copy Terminal command to clipboard")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(.top, 4)
         }
     }
 

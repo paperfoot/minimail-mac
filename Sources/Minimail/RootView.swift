@@ -192,9 +192,18 @@ struct OnboardingView: View {
             .buttonStyle(.borderedProminent)
             .disabled(inFlight || apiKey.isEmpty || !email.looksLikeEmail)
 
-            Text("You can add more accounts later from Settings.")
+            // Widget scope: account management happens via the Terminal
+            // CLI (`email-cli account add …`), not the in-app Settings
+            // UI. Onboarding used to promise "add more accounts from
+            // Settings" which didn't match reality — Settings only
+            // surfaces default-account + signature today. Keeping the
+            // Terminal path as the single source of truth until the
+            // future full app ships in-app add/remove.
+            Text("To add another account later, run `email-cli account add …` in Terminal.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
 
             Link("Need an API key? Create one on Resend →",
                  destination: URL(string: "https://resend.com/api-keys")!)
