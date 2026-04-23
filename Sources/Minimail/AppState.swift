@@ -337,8 +337,19 @@ final class AppState {
         let list = inbox.visible()
         guard !list.isEmpty else { return }
         let currentID = reader.loaded?.id
-        let idx = list.firstIndex { $0.id == currentID } ?? -1
-        let next = list.index(after: idx)
+        // If the current message dropped out of the visible list (archived,
+        // filtered out by a folder switch, snoozed in the background), land
+        // on the first row rather than computing next-after-(-1) — the old
+        // fallback used Swift's `index(after:)` on a -1 sentinel and then
+        // subscripted the result, which trap-crashed on the next access.
+        // Keeping the "first row" fallback matches what the user sees if
+        // they just opened the inbox cold.
+        guard let idx = list.firstIndex(where: { $0.id == currentID }) else {
+            inbox.focusedRowIndex = 0
+            open(message: list[0])
+            return
+        }
+        let next = idx + 1
         guard next < list.count else { return }
         inbox.focusedRowIndex = next
         open(message: list[next])
@@ -348,7 +359,17 @@ final class AppState {
         let list = inbox.visible()
         guard !list.isEmpty else { return }
         let currentID = reader.loaded?.id
-        let idx = list.firstIndex { $0.id == currentID } ?? list.count
+        // Symmetrical guard — if the current message isn't in the visible
+        // list, previous-from-nothing is undefined so open the first row
+        // (same behaviour as cold-open). Without this the old fallback
+        // `idx = list.count` combined with `prev = idx - 1` happened to
+        // land on the last row, which was a surprise teleport for anyone
+        // whose message got archived from under them.
+        guard let idx = list.firstIndex(where: { $0.id == currentID }) else {
+            inbox.focusedRowIndex = 0
+            open(message: list[0])
+            return
+        }
         let prev = idx - 1
         guard prev >= 0 else { return }
         inbox.focusedRowIndex = prev
