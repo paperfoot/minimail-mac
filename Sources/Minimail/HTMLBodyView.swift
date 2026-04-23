@@ -59,6 +59,14 @@ struct HTMLBodyView: View {
                 .frame(height: measuredHeight)
             }
         }
+        // Reset the fail-closed latch when a new message is shown. Without
+        // this, the @State var persists across identical SwiftUI view
+        // identities — once a compile failure flipped it true, j/k
+        // navigation between messages kept rendering the banner even after
+        // the compile retried successfully on the next instance.
+        .onChange(of: wrappedHTML) { _, _ in
+            if rulesFailed { rulesFailed = false }
+        }
     }
 }
 
