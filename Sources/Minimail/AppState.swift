@@ -506,13 +506,32 @@ final class AppState {
         if reader.error != nil { reader.error = nil }
         router.currentView = .reader(id)
         loadFullMessage(id: id)
+        // Mark read. The message may or may not be in our currently-loaded
+        // inbox slice (e.g. notification click for a different account or a
+        // message older than our 100-row pull window). Only flip the local
+        // `is_read` + decrement the badge when we actually observe the
+        // previously-unread state in-memory. For the out-of-view case, ask
+        // the CLI for fresh stats instead of blindly decrementing — the old
+        // "always --" path undercounted the badge on cross-account
+        // notifications.
         Task { [weak self, id] in
             try? await self?.cli.markRead(ids: [id])
             guard let self else { return }
             if let idx = self.inbox.messages.firstIndex(where: { $0.id == id }) {
+                let wasUnread = self.inbox.messages[idx].isUnread
                 self.inbox.messages[idx].is_read = true
+                if wasUnread {
+                    self.inbox.totalUnread = max(0, self.inbox.totalUnread - 1)
+                }
+                return
             }
-            self.inbox.totalUnread = max(0, self.inbox.totalUnread - 1)
+            // Message not in current view — reconcile via stats for the
+            // currently-displayed account (nil = unified).
+            let account = self.session.currentAccount?.email
+            if let stats = try? await self.cli.stats(account: account),
+               let unread = stats.unread {
+                self.inbox.totalUnread = unread
+            }
         }
     }
 
