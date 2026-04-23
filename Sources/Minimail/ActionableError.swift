@@ -19,6 +19,21 @@ enum ActionableError: Equatable, Sendable {
     /// email-cli binary isn't installed / not in PATH.
     case cliMissing
 
+    /// Destination volume is full. Common on the attachment-download path
+    /// when the user picks a save location on an external drive that's out
+    /// of space.
+    case diskFull
+
+    /// Referenced file isn't on disk. Surfaces from attachment-download
+    /// (destination parent missing) and draft autosave (user added a file
+    /// that later got trashed or the volume ejected).
+    case fileNotFound
+
+    /// macOS denied write/read to the path. Often the user picked a
+    /// sandboxed location (iCloud Drive page with upload-in-progress,
+    /// another app's container) or a read-only mount.
+    case permissionDenied
+
     /// Any other unclassified error. Show the message verbatim.
     case other(String)
 
@@ -28,6 +43,9 @@ enum ActionableError: Equatable, Sendable {
         case .invalidAPIKey(_, let s): return s
         case .rateLimited(let s, _): return s
         case .cliMissing: return "email-cli not found."
+        case .diskFull: return "The destination disk is full. Pick a different save location and retry."
+        case .fileNotFound: return "The file is no longer at its original location."
+        case .permissionDenied: return "Can't write to that location. Pick a folder you own."
         case .other(let s): return s
         }
     }
@@ -99,6 +117,26 @@ extension ActionableError {
             || s.contains("tls")
             || s.contains("timed out") {
             return .network(raw)
+        }
+
+        // Local filesystem errors — most common on the attachment download
+        // path. Surface a human-readable version instead of the raw errno
+        // string (which leaks the absolute save-path the user chose).
+        if s.contains("no space left on device")
+            || s.contains("disk is full")
+            || s.contains("enospc") {
+            return .diskFull
+        }
+        if s.contains("no such file or directory")
+            || s.contains("file doesn't exist")
+            || s.contains("file does not exist")
+            || s.contains("enoent") {
+            return .fileNotFound
+        }
+        if s.contains("permission denied")
+            || s.contains("operation not permitted")
+            || s.contains("eacces") {
+            return .permissionDenied
         }
 
         return nil
