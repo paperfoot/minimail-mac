@@ -205,6 +205,7 @@ private struct RecipientPill: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .accessibilityLabel("Remove recipient")
             }
         }
         .padding(.horizontal, 8)

@@ -18,6 +18,8 @@ struct KeyboardHelpView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .keyboardShortcut(.escape, modifiers: [])
+                .help("Close keyboard help (esc)")
+                .accessibilityLabel("Close keyboard help")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -32,6 +34,14 @@ struct KeyboardHelpView: View {
                         ("⎋", "Back to inbox / close sheet"),
                         ("⌘ ,", "Settings"),
                         ("⌘ /", "This help"),
+                    ])
+                    // Account quick-switcher shortcuts — ⌘0 for unified
+                    // "All Accounts" view, ⌘1…⌘9 for individual accounts
+                    // in display order. Wired in RootView's invisible
+                    // shortcut-hijack background.
+                    section("Accounts", rows: [
+                        ("⌘ 0", "All Accounts (unified inbox)"),
+                        ("⌘ 1 … ⌘ 9", "Switch to individual account"),
                     ])
                     section("Inbox", rows: [
                         ("⌘ N", "New message"),
