@@ -403,6 +403,16 @@ final class AppState {
             inbox.totalUnread = stats?.unread ?? inbox.messages.filter(\.isUnread).count
             inbox.error = nil
             rebuildContactIndex()
+            // Eager attachment cache — Resend's signed URLs expire (seen as
+            // CloudFront 403s at click time) and sometimes arrive as null in
+            // the webhook. Prefetch keeps the bytes on disk so attachments
+            // stay openable regardless. Fire-and-forget; the user doesn't
+            // need to wait for it.
+            if pull {
+                Task { [weak self, account = email] in
+                    try? await self?.cli.prefetchAttachments(account: account)
+                }
+            }
         } catch {
             let actionable = ActionableError.classify(error)
             inbox.error = actionable
