@@ -244,6 +244,8 @@ struct InboxView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .help("Clear selection")
+            .accessibilityLabel("Clear selection")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

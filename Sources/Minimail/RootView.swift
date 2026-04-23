@@ -390,6 +390,7 @@ struct OutboxRecoveryBanner: View {
             }
             .buttonStyle(.plain)
             .help("Dismiss — the message stays in the outbox for later retry")
+            .accessibilityLabel("Dismiss failed-send banner")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

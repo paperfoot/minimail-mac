@@ -14,6 +14,7 @@ struct AccountSwitcherView: View {
                 .buttonStyle(IconButtonStyle())
                 .keyboardShortcut(.escape, modifiers: [])
                 .help("Back to inbox (esc)")
+                .accessibilityLabel("Back to inbox")
 
                 Text("Accounts")
                     .font(.system(size: 13, weight: .semibold))
