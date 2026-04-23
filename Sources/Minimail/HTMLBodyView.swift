@@ -22,14 +22,43 @@ struct HTMLBodyView: View {
     /// non-zero placeholder so the view doesn't collapse before the first
     /// measurement comes back.
     @State private var measuredHeight: CGFloat = 80
+    /// Flips true if the content-blocking rule list failed to compile. We
+    /// refuse to render any HTML in that state — privacy trumps display,
+    /// since the whole point of the rule list is to block remote trackers
+    /// and tracking pixels in incoming mail.
+    @State private var rulesFailed: Bool = false
 
     init(html: String) {
         self.wrappedHTML = HTMLWebView.wrap(html)
     }
 
     var body: some View {
-        HTMLWebView(wrappedHTML: wrappedHTML, height: $measuredHeight)
-            .frame(height: measuredHeight)
+        Group {
+            if rulesFailed {
+                // Fail-closed banner. We intentionally do NOT load the email
+                // HTML when the blocker rule list didn't compile — the HTML
+                // could contain remote images/pixels that would silently
+                // fire and expose the user to trackers. Showing a minimal
+                // banner is better than a blank area (confusing) or a
+                // rendered body (unsafe).
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.shield.fill")
+                        .foregroundStyle(.orange)
+                    Text("Message hidden — privacy filter failed to load. Reopen the message to retry.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HTMLWebView(
+                    wrappedHTML: wrappedHTML,
+                    height: $measuredHeight,
+                    rulesFailed: $rulesFailed
+                )
+                .frame(height: measuredHeight)
+            }
+        }
     }
 }
 
@@ -42,6 +71,10 @@ private struct HTMLWebView: NSViewRepresentable {
     /// downstream invalidation doesn't pay the wrap cost again.
     let wrappedHTML: String
     @Binding var height: CGFloat
+    /// Set true if the shared content-blocking rule list fails to compile.
+    /// Parent uses this to swap the web view out for a fail-closed banner
+    /// rather than leaking remote resource loads.
+    @Binding var rulesFailed: Bool
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -119,19 +152,41 @@ private struct HTMLWebView: NSViewRepresentable {
             coordinator.flushPending()
             return
         }
+        // Previously ignored a nil list here: we'd set `rulesReady = true`
+        // and flush the pending HTML anyway, which meant a compile failure
+        // silently rendered email bodies with no privacy filter attached —
+        // remote trackers and tracking pixels would fire. Fail closed
+        // instead: propagate the failure up through the parent's
+        // rulesFailed binding and never load HTML in this webview.
         rulesPending.append { [weak webView, weak coordinator] list in
             guard let webView, let coordinator else { return }
-            if let list { webView.configuration.userContentController.add(list) }
-            coordinator.rulesReady = true
-            coordinator.flushPending()
+            if let list {
+                webView.configuration.userContentController.add(list)
+                coordinator.rulesReady = true
+                coordinator.flushPending()
+            } else {
+                coordinator.rulesReady = false
+                coordinator.markRulesFailed()
+            }
         }
         guard !compileStarted else { return }
         compileStarted = true
         WKContentRuleListStore.default().compileContentRuleList(
             forIdentifier: "minimail-block-remote",
             encodedContentRuleList: blockRulesJSON
-        ) { list, _ in
+        ) { list, error in
             Task { @MainActor in
+                if list == nil || error != nil {
+                    // Don't cache a nil — a future webview instance might
+                    // get lucky (transient WebKit compiler state, disk
+                    // issues clearing up). Flush pending waiters as failed
+                    // this round.
+                    let waiting = rulesPending
+                    rulesPending = []
+                    compileStarted = false
+                    for cb in waiting { cb(nil) }
+                    return
+                }
                 cachedRuleList = list
                 let waiting = rulesPending
                 rulesPending = []
@@ -165,6 +220,16 @@ private struct HTMLWebView: NSViewRepresentable {
             webView.loadHTMLString(html, baseURL: nil)
             lastLoadedHTML = html
             pendingHTML = nil
+        }
+
+        /// Flip the parent view's failure binding so it can swap this web
+        /// view for a fail-closed banner. Also drop any pending HTML so a
+        /// late retry can't accidentally load it through an unguarded
+        /// webview. Called from `attachRuleList` when compile returns nil
+        /// or an error.
+        func markRulesFailed() {
+            pendingHTML = nil
+            parent.rulesFailed = true
         }
 
         // After the page lays out, ask the document for its real scrollHeight
