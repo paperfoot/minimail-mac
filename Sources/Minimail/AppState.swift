@@ -888,6 +888,25 @@ final class AppState {
             compose.body = draft.text_body ?? ""
         }
         compose.replyToID = draft.reply_to_message_id
+        // Restore the draft's originating sender so reopening a draft in
+        // unified-inbox mode doesn't quietly switch identities on the user.
+        // The draft row is the ground truth — `composeFromAccount` would
+        // fall back to the default account otherwise. Missing / deleted
+        // account is a no-op (compose then falls back to default — there's
+        // no safer choice and the user will see it in the From row).
+        if let account = draft.account_email {
+            compose.fromOverride = session.accounts.first { $0.email == account }
+        }
+        // Rehydrate attachments from the snapshot paths the Rust backend
+        // persisted. Files may have moved/been deleted since the draft was
+        // saved — skip missing ones silently rather than surface a noisy
+        // error, since the draft body is still salvageable.
+        if let paths = draft.attachment_paths, !paths.isEmpty {
+            let fm = FileManager.default
+            compose.attachments = paths
+                .map { URL(fileURLWithPath: $0) }
+                .filter { fm.fileExists(atPath: $0.path) }
+        }
         router.currentView = .compose(nil)
     }
 
@@ -918,18 +937,32 @@ final class AppState {
         let subject = compose.subject
         let body = compose.body.isEmpty ? nil : compose.body
         let html = compose.bodyHTML
+        let attachments = compose.attachments
+        // Resolve the draft's owning account in the same priority order as
+        // send(): explicit fromOverride wins, then composeFromAccount (which
+        // already handles default-account + first-account fallbacks), then
+        // currentAccount. This matters in unified-inbox mode (currentAccount
+        // == nil) where the old `session.currentAccount?.email` produced a
+        // nil account_email and the CLI fell back to the default — silently
+        // storing the draft under the wrong identity and later sending it
+        // from a different address than the user picked.
+        let accountEmail = compose.fromOverride?.email
+            ?? composeFromAccount?.email
+            ?? session.currentAccount?.email
 
         do {
             if let id = compose.editingDraftID {
                 try await cli.editDraft(
                     id: id, to: toList, cc: ccList, bcc: bccList,
-                    subject: subject, text: body, html: html
+                    subject: subject, text: body, html: html,
+                    attachments: attachments
                 )
             } else {
                 let draft = try await cli.createDraft(
-                    account: session.currentAccount?.email,
+                    account: accountEmail,
                     to: toList, cc: ccList, bcc: bccList,
                     subject: subject, text: body, html: html,
+                    attachments: attachments,
                     replyToMessageID: compose.replyToID
                 )
                 compose.editingDraftID = draft.id
