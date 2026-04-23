@@ -131,6 +131,12 @@ struct Draft: Decodable, Sendable, Identifiable, Hashable {
     let cc: [String]?
     let bcc: [String]?
     let subject: String?
+    /// Snapshotted absolute paths of every attachment the Rust backend copied
+    /// into its draft sandbox. Optional for forward-compat with older CLIs
+    /// that predated the attachment round-trip (those rows decode as nil and
+    /// the UI falls back to an empty attachment list). Wire-format matches
+    /// `DraftRecord.attachment_paths` in `email-cli/src/models.rs`.
+    let attachment_paths: [String]?
     let text_body: String?
     let html_body: String?
     let reply_to_message_id: Int64?

@@ -263,16 +263,7 @@ actor EmailCLI {
         return try await runJSON(args: args, as: [Draft].self)
     }
 
-    func createDraft(
-        account: String?,
-        to: [String],
-        cc: [String],
-        bcc: [String],
-        subject: String,
-        text: String?,
-        html: String? = nil,
-        replyToMessageID: Int64? = nil
-    ) async throws -> Draft {
+    func createDraft(account: String?, to: [String], cc: [String], bcc: [String], subject: String, text: String?, html: String? = nil, attachments: [URL] = [], replyToMessageID: Int64? = nil) async throws -> Draft {
         var args = ["draft", "create", "--json"]
         if let account { args += ["--account", account] }
         for t in to { args += ["--to", t] }
@@ -281,10 +272,20 @@ actor EmailCLI {
         args += ["--subject", subject]
         if let text { args += ["--text", text] }
         if let html { args += ["--html", html] }
+        for url in attachments { args += ["--attach", url.path] }
         if let replyToMessageID { args += ["--reply-to-msg", String(replyToMessageID)] }
         return try await runJSON(args: args, as: Draft.self)
     }
 
+    /// Edit a draft row by id. The Rust `draft edit` command's attachment
+    /// semantics are three-state:
+    ///   - any `--attach <path>` arguments REPLACE the stored list wholesale
+    ///     (Rust re-snapshots each path into the draft sandbox)
+    ///   - `--clear-attachments` drops every attachment without adding any
+    ///   - omitting both leaves the stored list untouched
+    /// We map `attachments == nil` to "don't touch" (omit both flags) and
+    /// `attachments == []` to "clear" (pass `--clear-attachments`). A non-empty
+    /// array always replaces. This preserves the Rust contract.
     func editDraft(
         id: String,
         to: [String]?,
@@ -292,7 +293,8 @@ actor EmailCLI {
         bcc: [String]?,
         subject: String?,
         text: String?,
-        html: String? = nil
+        html: String? = nil,
+        attachments: [URL]? = nil
     ) async throws {
         var args = ["draft", "edit", id, "--json"]
         if let subject { args += ["--subject", subject] }
@@ -301,6 +303,13 @@ actor EmailCLI {
         if let to { for t in to { args += ["--to", t] } }
         if let cc { for c in cc { args += ["--cc", c] } }
         if let bcc { for b in bcc { args += ["--bcc", b] } }
+        if let attachments {
+            if attachments.isEmpty {
+                args += ["--clear-attachments"]
+            } else {
+                for url in attachments { args += ["--attach", url.path] }
+            }
+        }
         _ = try await runRaw(args: args)
     }
 
