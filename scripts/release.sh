@@ -253,9 +253,12 @@ if [ "${SKIP_GH}" = "1" ]; then
 fi
 
 # ── Dirty-tree check — staged AND unstaged, only Info.plist permitted ─
+# `awk 'NF'` (print lines with fields) replaces `grep -v '^$'` here because
+# grep exits 1 on no-match under set -euo pipefail, aborting clean-tree
+# releases. awk exits 0 regardless of match count.
 STAGED="$(git diff --cached --name-only)"
 UNSTAGED="$(git diff --name-only)"
-ALL_DIRTY="$(printf '%s\n%s\n' "${STAGED}" "${UNSTAGED}" | grep -v '^$' | sort -u)"
+ALL_DIRTY="$(printf '%s\n%s\n' "${STAGED}" "${UNSTAGED}" | awk 'NF' | sort -u)"
 
 if [ -n "${ALL_DIRTY}" ]; then
     if [ "${ALL_DIRTY}" = "${PLIST}" ]; then
