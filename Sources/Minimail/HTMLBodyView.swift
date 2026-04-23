@@ -203,6 +203,17 @@ private struct HTMLWebView: NSViewRepresentable {
         // rulesFailed binding and never load HTML in this webview.
         rulesPending.append { [weak webView, weak coordinator] list in
             guard let webView, let coordinator else { return }
+            // If the user clicked "Load remote content" while we were still
+            // compiling, the opt-in path already marked this coordinator as
+            // `remoteContentAllowed` and reloaded the HTML without a blocker.
+            // Attaching the rule list now would silently re-enable blocking
+            // for the same message the user explicitly allowed — clobbering
+            // their choice. Skip the attach; still mark ready so any pending
+            // HTML flushes (already flushed in the opt-in path, but safe).
+            if coordinator.remoteContentAllowed {
+                coordinator.rulesReady = true
+                return
+            }
             if let list {
                 webView.configuration.userContentController.add(list)
                 coordinator.rulesReady = true
