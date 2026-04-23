@@ -86,6 +86,13 @@ struct RootView: View {
     @ViewBuilder
     private var accountQuickSwitcherShortcuts: some View {
         ZStack {
+            // ⌘0 → unified "All Accounts" inbox.
+            Button("") {
+                Task { await state.selectUnifiedInbox() }
+            }
+            .keyboardShortcut(KeyEquivalent("0"), modifiers: .command)
+            .opacity(0)
+            .allowsHitTesting(false)
             ForEach(1...9, id: \.self) { n in
                 Button("") {
                     Task { await state.selectAccount(at: n) }

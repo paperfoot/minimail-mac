@@ -41,11 +41,31 @@ struct InboxView: View {
                 state.openAccountSwitcher()
             } label: {
                 HStack(spacing: 8) {
-                    AccountAvatar(email: session.currentAccount?.email ?? "?")
-                    Text(session.currentAccount?.email ?? "No account")
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if session.currentAccount == nil && !session.accounts.isEmpty {
+                        // Unified inbox indicator — same gradient + symbol as
+                        // the AccountSwitcher row so the user immediately
+                        // recognises the mode.
+                        ZStack {
+                            Circle()
+                                .fill(LinearGradient(
+                                    colors: [.indigo, .purple],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ))
+                                .frame(width: 20, height: 20)
+                            Image(systemName: "tray.2.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                        Text("All accounts")
+                            .font(.system(size: 13, weight: .medium))
+                    } else {
+                        AccountAvatar(email: session.currentAccount?.email ?? "?")
+                        Text(session.currentAccount?.email ?? "No account")
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
@@ -56,7 +76,7 @@ struct InboxView: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .help("Switch account (⌘1…⌘9)")
+            .help("Switch account (⌘0 = all, ⌘1…⌘9 = individual)")
 
             Spacer()
 
@@ -472,6 +492,13 @@ struct MessageRow: View {
     var isChecked: Bool = false
     @State private var hovered = false
 
+    /// Unified inbox: each row shows a small mini-avatar of the destination
+    /// account so the user can tell at a glance which mailbox the message
+    /// belongs to. Hidden when focused on a single account (redundant).
+    private var showAccountIndicator: Bool {
+        state.session.currentAccount == nil
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             // Leading gutter — unread dot OR checkbox on hover/select.
@@ -480,6 +507,11 @@ struct MessageRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
+                    if showAccountIndicator {
+                        AccountAvatar(email: message.account_email)
+                            .frame(width: 14, height: 14)
+                            .help("To: \(message.account_email)")
+                    }
                     if message.isStarred {
                         Image(systemName: "star.fill")
                             .font(.system(size: 10))

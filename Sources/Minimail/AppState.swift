@@ -172,6 +172,12 @@ final class ComposeState {
         return found
     }
     var attachments: [URL] = []
+    /// Per-compose "Send from" override. nil = use `AppState.composeFromAccount`
+    /// (which falls back to default account or first account). Set when the
+    /// user picks a different identity in the compose From-dropdown — does
+    /// NOT change the inbox view (so picking a sender while reading the
+    /// unified inbox doesn't filter the inbox down to that account).
+    var fromOverride: Account?
     var replyToID: Int64?
     var forwardingID: Int64?
     var replyAll: Bool = false
@@ -193,6 +199,7 @@ final class ComposeState {
         to = ""; cc = ""; bcc = ""; subject = ""
         bodyAttributed = NSAttributedString()
         attachments = []
+        fromOverride = nil
         replyToID = nil; forwardingID = nil; replyAll = false; error = nil
         editingDraftID = nil; lastAutosaveAt = nil
     }
@@ -339,16 +346,37 @@ final class AppState {
         open(message: list[prev])
     }
 
+    /// Persisted across launches so unified vs single-account choice survives.
+    /// Stores either the email of the current account or the literal "all".
+    private static let preferredAccountKey = "minimail.preferredAccount"
+    private static let unifiedSentinel = "__all__"
+
     func refreshAccounts() async {
         do {
             let loaded = try await cli.listAccounts()
             session.accounts = loaded
             if session.currentAccount == nil {
-                session.currentAccount = loaded.first(where: { $0.is_default == true }) ?? loaded.first
+                // Restore the user's last choice from UserDefaults. Falls
+                // back to the default account on first launch.
+                let saved = UserDefaults.standard.string(forKey: Self.preferredAccountKey)
+                if saved == Self.unifiedSentinel {
+                    session.currentAccount = nil   // unified
+                } else if let email = saved, let match = loaded.first(where: { $0.email == email }) {
+                    session.currentAccount = match
+                } else {
+                    session.currentAccount = loaded.first(where: { $0.is_default == true }) ?? loaded.first
+                }
             }
         } catch {
             inbox.error = ActionableError.classify(error)
         }
+    }
+
+    /// Persist the user's account-view preference so a relaunch returns
+    /// to the same view (unified vs a specific account).
+    private func persistPreferredAccount() {
+        let value = session.currentAccount?.email ?? Self.unifiedSentinel
+        UserDefaults.standard.set(value, forKey: Self.preferredAccountKey)
     }
 
     /// `pull: true` hits Resend first for new mail, then re-reads the local DB.
@@ -603,8 +631,28 @@ final class AppState {
         guard index >= 1, index <= session.accounts.count else { return }
         let acct = session.accounts[index - 1]
         session.currentAccount = acct
+        persistPreferredAccount()
         try? await cli.setDefaultAccount(acct.email)
         await refreshInbox(pull: false)
+    }
+
+    /// Switch to unified "All Accounts" mode. `currentAccount = nil` is the
+    /// sentinel; `refreshInbox` then queries the CLI without an --account
+    /// filter so messages from every mailbox stream into one list. Compose
+    /// falls back to the default account (see `composeFromAccount`).
+    func selectUnifiedInbox() async {
+        session.currentAccount = nil
+        persistPreferredAccount()
+        await refreshInbox(pull: false)
+    }
+
+    /// Account to send from when composing. Mirrors `currentAccount` when
+    /// it's set; otherwise picks the user's marked default; otherwise the
+    /// first account we know about. Used by `send()` and the From dropdown.
+    var composeFromAccount: Account? {
+        session.currentAccount
+            ?? session.accounts.first(where: { $0.is_default == true })
+            ?? session.accounts.first
     }
 
     func markAllRead() async {
@@ -780,6 +828,11 @@ final class AppState {
         compose.replyToID = replyTo?.id
         compose.replyAll = replyAll
         if let msg = replyTo {
+            // Always reply FROM the account the original was addressed to —
+            // this matters in unified inbox mode where currentAccount is
+            // nil and the default-account fallback would send from the
+            // wrong identity. Single-account mode is unaffected.
+            compose.fromOverride = session.accounts.first(where: { $0.email == msg.account_email })
             compose.to = msg.from_addr
             let sub = msg.subject ?? ""
             compose.subject = sub.lowercased().hasPrefix("re:") ? sub : "Re: \(sub)"
@@ -815,6 +868,10 @@ final class AppState {
     func startForward(of message: Message) {
         compose.clear()
         compose.forwardingID = message.id
+        // Forward FROM the account the message was originally sent to / from.
+        // Same reasoning as Reply (above) — unified-mode forwards must use
+        // the right identity, not the global default.
+        compose.fromOverride = session.accounts.first(where: { $0.email == message.account_email })
         let sub = message.subject ?? ""
         let lowered = sub.lowercased()
         let alreadyForwarded = lowered.hasPrefix("fwd:") || lowered.hasPrefix("fw:")
@@ -964,8 +1021,12 @@ final class AppState {
         let now = Date()
         let plainText = compose.body.isEmpty ? nil : compose.body
         let html = compose.bodyHTML
+        // Resolve send identity in priority order:
+        //   1. compose.fromOverride (user picked it explicitly in the dropdown)
+        //   2. composeFromAccount (currentAccount, or default, or first)
+        let fromAccount = compose.fromOverride?.email ?? composeFromAccount?.email
         let snapshot = PendingSend(
-            from: session.currentAccount?.email,
+            from: fromAccount,
             to: to,
             cc: cc,
             bcc: bcc,
