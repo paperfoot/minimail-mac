@@ -213,11 +213,15 @@ final class ComposeState {
         editingDraftID = nil; lastAutosaveAt = nil
     }
 
-    /// Anything worth persisting?
+    /// Anything worth persisting? Attachments count: "dropped a file, closed
+    /// the popover" is a common flow where the user hasn't typed anything yet
+    /// but absolutely expects the draft to survive. Without the attachments
+    /// clause the autosave scheduler short-circuits and the file is lost.
     var hasContent: Bool {
         !to.trimmingCharacters(in: .whitespaces).isEmpty
         || !subject.trimmingCharacters(in: .whitespaces).isEmpty
         || !body.trimmingCharacters(in: .whitespaces).isEmpty
+        || !attachments.isEmpty
     }
 }
 
@@ -988,6 +992,43 @@ final class AppState {
         compose.autosaveTask?.cancel()
         compose.autosaveTask = nil
         await performAutosave()
+    }
+
+    // ── Attachment mutations (centralised) ───────────────────────────────
+    //
+    // Every add/remove site routes through these two helpers so autosave runs
+    // without the view layer having to remember. Without central routing the
+    // bug was: drag in a file, close the popover → `compose.attachments` is
+    // non-empty but `scheduleAutosave()` was never called, so the draft row
+    // was never written and the user lost their file. GPT-5.4 Pro Recipe #4.
+
+    /// Add an attachment URL to the current compose draft, dedup-by-URL,
+    /// and schedule an autosave. Safe on the main actor.
+    func addAttachment(_ url: URL) {
+        guard !compose.attachments.contains(url) else { return }
+        compose.attachments.append(url)
+        scheduleAutosave()
+    }
+
+    /// Append multiple attachments (e.g. NSOpenPanel selection) in one go.
+    /// Single scheduleAutosave call at the end — the debounce coalesces.
+    func addAttachments(_ urls: [URL]) {
+        var changed = false
+        for url in urls where !compose.attachments.contains(url) {
+            compose.attachments.append(url)
+            changed = true
+        }
+        if changed { scheduleAutosave() }
+    }
+
+    /// Remove an attachment URL from the compose draft + schedule autosave.
+    /// When the last attachment is removed from a previously attach-only
+    /// draft we force an immediate flush so the Rust side clears its stored
+    /// list now rather than after the 1.5s debounce — matters if the user
+    /// then closes the popover before the debounce fires.
+    func removeAttachment(_ url: URL) {
+        compose.attachments.removeAll { $0 == url }
+        scheduleAutosave()
     }
 
     // ── Compose ──────────────────────────────────────────────────────────

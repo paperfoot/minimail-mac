@@ -158,9 +158,12 @@ struct ComposeView: View {
                     }
                     if let url {
                         Task { @MainActor in
-                            if !state.compose.attachments.contains(url) {
-                                state.compose.attachments.append(url)
-                            }
+                            // Route every add through AppState so autosave
+                            // fires. Previously a dropped file updated
+                            // compose.attachments directly and the debounce
+                            // scheduler stayed idle — closing the popover
+                            // before typing dropped the file on the floor.
+                            state.addAttachment(url)
                         }
                     }
                 }
@@ -184,7 +187,7 @@ struct ComposeView: View {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         do {
             try png.write(to: url)
-            state.compose.attachments.append(url)
+            state.addAttachment(url)
         } catch {
             state.compose.error = "Couldn't save pasted image: \(error.localizedDescription)"
         }
@@ -277,7 +280,7 @@ struct ComposeView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         if panel.runModal() == .OK {
-            state.compose.attachments.append(contentsOf: panel.urls)
+            state.addAttachments(panel.urls)
         }
     }
 
@@ -396,7 +399,7 @@ struct ComposeView: View {
             FlowLayout(spacing: 6) {
                 ForEach(state.compose.attachments, id: \.self) { url in
                     ComposeAttachmentChip(url: url) {
-                        state.compose.attachments.removeAll { $0 == url }
+                        state.removeAttachment(url)
                     }
                 }
             }
