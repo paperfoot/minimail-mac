@@ -286,8 +286,13 @@ actor EmailCLI {
     /// We map `attachments == nil` to "don't touch" (omit both flags) and
     /// `attachments == []` to "clear" (pass `--clear-attachments`). A non-empty
     /// array always replaces. This preserves the Rust contract.
+    ///
+    /// `account` is optional: pass it when the user changes the From dropdown
+    /// on an existing draft. Omit to preserve the stored account_email. The
+    /// Rust side (draft_edit in commands/draft.rs) wires this into the UPDATE.
     func editDraft(
         id: String,
+        account: String? = nil,
         to: [String]?,
         cc: [String]?,
         bcc: [String]?,
@@ -297,6 +302,7 @@ actor EmailCLI {
         attachments: [URL]? = nil
     ) async throws {
         var args = ["draft", "edit", id, "--json"]
+        if let account { args += ["--account", account] }
         if let subject { args += ["--subject", subject] }
         if let text { args += ["--text", text] }
         if let html { args += ["--html", html] }

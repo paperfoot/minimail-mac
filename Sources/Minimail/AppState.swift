@@ -952,7 +952,22 @@ final class AppState {
         let subject = compose.subject
         let body = compose.body.isEmpty ? nil : compose.body
         let html = compose.bodyHTML
-        let attachments = compose.attachments
+        // Filter out attachments whose files have disappeared since the user
+        // added them (moved to trash, ejected volume, etc.). Rust's snapshot
+        // step opens every path and errors on the first miss, which would
+        // abort the whole autosave and leave the user with no draft AND no
+        // visible error. Drop the missing ones quietly for the CLI call but
+        // keep them in compose.attachments for the UI so the user sees the
+        // chip and can remove it. Surface a transient status if any dropped.
+        let allAttachments = compose.attachments
+        let existingAttachments = allAttachments.filter {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+        let droppedCount = allAttachments.count - existingAttachments.count
+        if droppedCount > 0 {
+            flashStatus(.info("\(droppedCount) attachment file\(droppedCount == 1 ? "" : "s") no longer on disk — not saved"))
+        }
+
         // Resolve the draft's owning account in the same priority order as
         // send(): explicit fromOverride wins, then composeFromAccount (which
         // already handles default-account + first-account fallbacks), then
@@ -967,24 +982,35 @@ final class AppState {
 
         do {
             if let id = compose.editingDraftID {
+                // Pass account so sender changes on an existing draft persist
+                // across reopen. Before this, editDraft ignored the account
+                // and the Rust UPDATE didn't touch account_email — user
+                // picks a new From, closes, reopens → sees original.
                 try await cli.editDraft(
-                    id: id, to: toList, cc: ccList, bcc: bccList,
+                    id: id, account: accountEmail,
+                    to: toList, cc: ccList, bcc: bccList,
                     subject: subject, text: body, html: html,
-                    attachments: attachments
+                    attachments: existingAttachments
                 )
             } else {
                 let draft = try await cli.createDraft(
                     account: accountEmail,
                     to: toList, cc: ccList, bcc: bccList,
                     subject: subject, text: body, html: html,
-                    attachments: attachments,
+                    attachments: existingAttachments,
                     replyToMessageID: compose.replyToID
                 )
                 compose.editingDraftID = draft.id
             }
             compose.lastAutosaveAt = Date()
         } catch {
-            // Autosave failures are silent — we'll try again on the next edit.
+            // Route through ActionableError so the user sees a human-readable
+            // error when the CLI itself fails (not just a silent retry on
+            // next keystroke). Silent swallow was masking real bugs — e.g.
+            // the account not existing in any profile, or the draft id
+            // going stale.
+            let actionable = ActionableError.classify(error)
+            flashStatus(.info("Draft autosave failed: \(actionable.message)"))
         }
     }
 
@@ -1124,9 +1150,12 @@ final class AppState {
                 try await cli.downloadAttachment(messageID: messageID,
                                                  attachmentID: attachment.id,
                                                  to: dest)
-                if !compose.attachments.contains(dest) {
-                    compose.attachments.append(dest)
-                }
+                // Route through the centralised helper so the late-arriving
+                // attachment schedules an autosave — direct append here used
+                // to skip autosave, so forward-with-attachments drafts lost
+                // the files if the user closed the popover before the
+                // download finished.
+                addAttachment(dest)
             } catch {
                 Log.cli.error("forward re-attach failed for \(filename, privacy: .public): \(String(describing: error), privacy: .public)")
             }
