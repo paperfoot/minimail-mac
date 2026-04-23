@@ -91,9 +91,19 @@ actor EmailCLI {
     }
 
     /// Create a profile (Resend API key container) via the CLI.
+    ///
+    /// The API key is passed through the child process's environment, not
+    /// via argv. `ps aux` and the `/proc`/kernel audit trail on many UNIX
+    /// systems make argv world-readable, so putting the Resend key there
+    /// leaked it to every other user on the machine (and to tools like
+    /// `lsof -p` that snapshot command lines). The CLI's `--api-key-env`
+    /// flag reads the key from whatever variable name we pass; the key
+    /// itself lives only in the child's environment block, which macOS
+    /// restricts to the same user's processes.
     func addProfile(name: String, apiKey: String) async throws {
-        let args = ["profile", "add", name, "--api-key", apiKey, "--json"]
-        _ = try await runRaw(args: args)
+        let envName = "MINIMAIL_RESEND_API_KEY"
+        let args = ["profile", "add", name, "--api-key-env", envName, "--json"]
+        _ = try await runRaw(args: args, env: [envName: apiKey])
     }
 
     /// Register a mailbox (email + profile) with optional default flag.
@@ -396,18 +406,29 @@ actor EmailCLI {
         }
     }
 
-    private func runRaw(args: [String]) async throws -> Data {
+    private func runRaw(args: [String], env: [String: String]? = nil) async throws -> Data {
         guard let bin = await locate() else { throw CLIError.notFound }
-        return try await runPlainData(bin, args)
+        return try await runPlainData(bin, args, env: env)
     }
 
     /// Launches a subprocess, drains stdout + stderr *while the child runs* so
     /// large payloads can't deadlock on pipe buffer exhaustion. Cancellation
     /// from Swift Task cancel sends SIGTERM to the child.
-    private func runPlainData(_ binary: String, _ args: [String]) async throws -> Data {
+    ///
+    /// `env` values are *added to* the parent's environment — not replacing
+    /// it — so the child still sees $PATH, $HOME, etc. We merge rather than
+    /// overwrite so the Resend API key can be passed via env (keeping it out
+    /// of argv) without breaking everything else the CLI expects from its
+    /// ambient environment.
+    private func runPlainData(_ binary: String, _ args: [String], env: [String: String]? = nil) async throws -> Data {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = args
+        if let env, !env.isEmpty {
+            var merged = ProcessInfo.processInfo.environment
+            for (k, v) in env { merged[k] = v }
+            process.environment = merged
+        }
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
