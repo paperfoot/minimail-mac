@@ -116,13 +116,13 @@ struct RichTextToolbar: View {
     var body: some View {
         HStack(spacing: 2) {
             toolButton(symbol: "bold", help: "Bold (⌘B)") {
-                NSApp.sendAction(#selector(NSFontManager.addFontTrait(_:)), to: nil, from: BoldTrigger())
+                toggleFontTrait(.boldFontMask)
             }
             toolButton(symbol: "italic", help: "Italic (⌘I)") {
-                NSApp.sendAction(#selector(NSFontManager.addFontTrait(_:)), to: nil, from: ItalicTrigger())
+                toggleFontTrait(.italicFontMask)
             }
             toolButton(symbol: "underline", help: "Underline (⌘U)") {
-                NSApp.sendAction(#selector(NSText.underline(_:)), to: nil, from: nil)
+                toggleUnderline()
             }
             divider
             toolButton(symbol: "list.bullet", help: "Bullet list") { insertListMarker("•  ") }
@@ -157,6 +157,79 @@ struct RichTextToolbar: View {
         // shortcut ("Bold (⌘B)"), so reuse it as the accessibility label
         // rather than surface the raw SF Symbol name ("bold").
         .accessibilityLabel(help)
+    }
+
+    private func toggleFontTrait(_ trait: NSFontTraitMask) {
+        guard let textView = textViewProvider(),
+              let storage = textView.textStorage else { return }
+        let manager = NSFontManager.shared
+        let fallback = textView.font ?? NSFont.systemFont(ofSize: 13)
+        let selected = textView.selectedRange()
+
+        if selected.length == 0 {
+            var attrs = textView.typingAttributes
+            let font = attrs[.font] as? NSFont ?? fallback
+            let traits = manager.traits(of: font)
+            attrs[.font] = traits.contains(trait)
+                ? manager.convert(font, toNotHaveTrait: trait)
+                : manager.convert(font, toHaveTrait: trait)
+            textView.typingAttributes = attrs
+            return
+        }
+
+        var allSelectedTextHasTrait = true
+        storage.enumerateAttribute(.font, in: selected, options: []) { value, _, stop in
+            let font = value as? NSFont ?? fallback
+            if !manager.traits(of: font).contains(trait) {
+                allSelectedTextHasTrait = false
+                stop.pointee = true
+            }
+        }
+
+        if textView.shouldChangeText(in: selected, replacementString: nil) {
+            storage.beginEditing()
+            storage.enumerateAttribute(.font, in: selected, options: []) { value, range, _ in
+                let font = value as? NSFont ?? fallback
+                let updated = allSelectedTextHasTrait
+                    ? manager.convert(font, toNotHaveTrait: trait)
+                    : manager.convert(font, toHaveTrait: trait)
+                storage.addAttribute(.font, value: updated, range: range)
+            }
+            storage.endEditing()
+            textView.didChangeText()
+        }
+    }
+
+    private func toggleUnderline() {
+        guard let textView = textViewProvider(),
+              let storage = textView.textStorage else { return }
+        let selected = textView.selectedRange()
+        let style = NSUnderlineStyle.single.rawValue
+
+        if selected.length == 0 {
+            var attrs = textView.typingAttributes
+            let current = attrs[.underlineStyle] as? Int
+            attrs[.underlineStyle] = current == style ? nil : style
+            textView.typingAttributes = attrs
+            return
+        }
+
+        var allSelectedTextIsUnderlined = true
+        storage.enumerateAttribute(.underlineStyle, in: selected, options: []) { value, _, stop in
+            if (value as? Int) != style {
+                allSelectedTextIsUnderlined = false
+                stop.pointee = true
+            }
+        }
+
+        if textView.shouldChangeText(in: selected, replacementString: nil) {
+            if allSelectedTextIsUnderlined {
+                storage.removeAttribute(.underlineStyle, range: selected)
+            } else {
+                storage.addAttribute(.underlineStyle, value: style, range: selected)
+            }
+            textView.didChangeText()
+        }
     }
 
     /// Prepend a simple list marker to each selected line. Keeps the HTML
@@ -221,14 +294,4 @@ struct RichTextToolbar: View {
             textView.didChangeText()
         }
     }
-}
-
-/// Senders for `NSFontManager.addFontTrait(_:)` — the font panel looks at
-/// `tag()` on the sender to decide which trait to toggle. This is the
-/// documented way to trigger bold / italic from custom toolbar buttons.
-private final class BoldTrigger: NSObject {
-    @objc func tag() -> Int { Int(NSFontTraitMask.boldFontMask.rawValue) }
-}
-private final class ItalicTrigger: NSObject {
-    @objc func tag() -> Int { Int(NSFontTraitMask.italicFontMask.rawValue) }
 }

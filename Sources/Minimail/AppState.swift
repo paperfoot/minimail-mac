@@ -816,7 +816,6 @@ final class AppState {
         let acct = session.accounts[index - 1]
         session.currentAccount = acct
         persistPreferredAccount()
-        try? await cli.setDefaultAccount(acct.email)
         await refreshInbox(pull: false)
     }
 
@@ -1043,7 +1042,7 @@ final class AppState {
         // Reentrancy guard: if a save is in flight, skip this call — the next
         // keystroke will reschedule. Prevents a fast typist from storming
         // createDraft with concurrent tasks (each picks up editingDraftID=nil).
-        guard !compose.isAutosaving, compose.hasContent else { return }
+        guard !compose.isAutosaving, (compose.hasContent || compose.editingDraftID != nil) else { return }
         compose.isAutosaving = true
         defer { compose.isAutosaving = false }
 
@@ -1051,7 +1050,7 @@ final class AppState {
         let ccList = splitAddresses(compose.cc)
         let bccList = splitAddresses(compose.bcc)
         let subject = compose.subject
-        let body = compose.body.isEmpty ? nil : compose.body
+        let body = compose.body
         let html = compose.bodyHTML
         // Filter out attachments whose files have disappeared since the user
         // added them (moved to trash, ejected volume, etc.). Rust's snapshot
@@ -1188,7 +1187,7 @@ final class AppState {
             // minus the user's own address (would self-reply) and minus the
             // person we're already replying to in `to`.
             if replyAll {
-                let me = session.currentAccount?.email.lowercased() ?? ""
+                let me = (compose.fromOverride?.email ?? msg.account_email).lowercased()
                 let primary = msg.fromParts.email.lowercased()
                 let pool = (msg.to ?? []) + (msg.cc ?? [])
                 let cc = pool
