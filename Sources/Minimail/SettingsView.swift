@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ServiceManagement
 
 /// Keys used for persisted settings. UserDefaults + @AppStorage binds cleanly.
 enum SettingsKey {
@@ -24,6 +25,15 @@ struct SettingsView: View {
     @State private var signatureSaving: Bool = false
     @State private var signatureSaved: Date?
     @State private var signatureEditorHandle = RichTextEditorHandle()
+    @State private var launchAtLoginEnabled: Bool = false
+    @State private var launchAtLoginError: String?
+    @State private var apiKeyProfile: String?
+    @State private var apiKeyDraft: String = ""
+    @State private var apiKeySaving: Bool = false
+    @State private var apiKeyStatus: String?
+    @State private var outboxEntries: [OutboxEntry] = []
+    @State private var outboxLoading: Bool = false
+    @State private var outboxStatus: String?
     @AppStorage(SettingsKey.syncIntervalSeconds) private var syncInterval: Int = 60
     @AppStorage(MetricsManager.enabledKey) private var diagnosticsEnabled: Bool = true
 
@@ -43,11 +53,17 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     accountsSection
                     Divider().opacity(0.15)
+                    apiKeySection
+                    Divider().opacity(0.15)
                     signatureSection
                     Divider().opacity(0.15)
                     syncSection
                     Divider().opacity(0.15)
+                    launchAtLoginSection
+                    Divider().opacity(0.15)
                     notificationsSection
+                    Divider().opacity(0.15)
+                    outboxSection
                     Divider().opacity(0.15)
                     diagnosticsSection
                     Divider().opacity(0.15)
@@ -57,7 +73,12 @@ struct SettingsView: View {
                 .padding(.vertical, 14)
             }
         }
-        .onAppear { loadSignatureForCurrentAccount() }
+        .onAppear {
+            loadSignatureForCurrentAccount()
+            loadLaunchAtLoginState()
+            loadAPIKeyProfile()
+            Task { await loadOutbox() }
+        }
     }
 
     private var header: some View {
@@ -108,7 +129,8 @@ struct SettingsView: View {
                 // already has email-cli, `email-cli account add …` also
                 // works — both commands are equivalent.
                 let bundledCLI = "/Applications/Minimail.app/Contents/MacOS/email-cli"
-                let addCommand = "\"\(bundledCLI)\" account add you@your-domain.com"
+                let profile = state.session.accounts.first?.profile_name ?? "default"
+                let addCommand = "\"\(bundledCLI)\" account add you@your-domain.com --profile \(profile)"
                 HStack(spacing: 6) {
                     Text(addCommand)
                         .font(.system(.caption, design: .monospaced))
@@ -142,6 +164,97 @@ struct SettingsView: View {
             await state.refreshAccounts()
             state.session.currentAccount = state.session.accounts.first { $0.email == account.email }
         } catch {
+            state.inbox.error = ActionableError.classify(error)
+        }
+    }
+
+    // ── Resend key ───────────────────────────────────────────────────────
+
+    private var apiKeySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Resend key", subtitle: "Repair or rotate the API key for a profile")
+            if availableProfiles.isEmpty {
+                Text("No profiles configured")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    Picker("", selection: Binding(
+                        get: { apiKeyProfile ?? availableProfiles.first ?? "" },
+                        set: { apiKeyProfile = $0; apiKeyStatus = nil }
+                    )) {
+                        ForEach(availableProfiles, id: \.self) { profile in
+                            Text(profile).tag(profile)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+
+                    SecureField("re_…", text: $apiKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                }
+
+                HStack(spacing: 8) {
+                    if apiKeySaving { ProgressView().controlSize(.small) }
+                    if let apiKeyStatus {
+                        Text(apiKeyStatus)
+                            .font(.system(size: 10))
+                            .foregroundStyle(apiKeyStatus == "Saved" || apiKeyStatus == "Works" ? .green : .secondary)
+                    }
+                    Spacer()
+                    Button("Test") {
+                        Task { await testAPIKeyProfile() }
+                    }
+                    .disabled(apiKeySaving)
+                    .controlSize(.small)
+                    Button("Save") {
+                        Task { await saveAPIKey() }
+                    }
+                    .disabled(apiKeySaving || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    private var availableProfiles: [String] {
+        Array(Set(state.session.accounts.map(\.profile_name))).sorted()
+    }
+
+    private func loadAPIKeyProfile() {
+        if apiKeyProfile == nil {
+            apiKeyProfile = state.session.currentAccount?.profile_name ?? availableProfiles.first
+        }
+    }
+
+    private func saveAPIKey() async {
+        guard let profile = apiKeyProfile ?? availableProfiles.first else { return }
+        let key = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        apiKeySaving = true
+        defer { apiKeySaving = false }
+        do {
+            try await EmailCLI.shared.addProfile(name: profile, apiKey: key)
+            try await EmailCLI.shared.testProfile(name: profile)
+            apiKeyDraft = ""
+            apiKeyStatus = "Saved"
+            await state.refreshAccounts()
+        } catch {
+            apiKeyStatus = "Failed"
+            state.inbox.error = ActionableError.classify(error)
+        }
+    }
+
+    private func testAPIKeyProfile() async {
+        guard let profile = apiKeyProfile ?? availableProfiles.first else { return }
+        apiKeySaving = true
+        defer { apiKeySaving = false }
+        do {
+            try await EmailCLI.shared.testProfile(name: profile)
+            apiKeyStatus = "Works"
+        } catch {
+            apiKeyStatus = "Failed"
             state.inbox.error = ActionableError.classify(error)
         }
     }
@@ -226,7 +339,11 @@ struct SettingsView: View {
         defer { signatureSaving = false }
         do {
             let stored = SignatureFormatting.storageString(from: signatureDraft)
-            try await EmailCLI.shared.setSignature(stored, for: account)
+            try await EmailCLI.shared.setSignature(
+                stored,
+                isHTML: SignatureFormatting.isHTML(stored),
+                for: account
+            )
             signatureSaved = Date()
             Task {
                 try? await Task.sleep(for: .seconds(2))
@@ -258,6 +375,49 @@ struct SettingsView: View {
         }
     }
 
+    // ── Launch at login ─────────────────────────────────────────────────
+
+    private var launchAtLoginSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Launch at login", subtitle: "Open Minimail automatically when you sign in")
+            Toggle(isOn: Binding(
+                get: { launchAtLoginEnabled },
+                set: { enabled in setLaunchAtLogin(enabled) }
+            )) {
+                Text("Open Minimail at login")
+                    .font(.system(size: 12))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            if let launchAtLoginError {
+                Text(launchAtLoginError)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    private func loadLaunchAtLoginState() {
+        launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            launchAtLoginEnabled = enabled
+            launchAtLoginError = nil
+        } catch {
+            launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+            launchAtLoginError = ActionableError.classify(error).message
+        }
+    }
+
     // ── Notifications ────────────────────────────────────────────────────
 
     private var notificationsSection: some View {
@@ -281,6 +441,107 @@ struct SettingsView: View {
                 .controlSize(.small)
             }
             .padding(.top, 4)
+        }
+    }
+
+    // ── Outbox ──────────────────────────────────────────────────────────
+
+    private var outboxSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Outbox", subtitle: "Failed and pending sends stay here until delivered")
+
+            HStack(spacing: 8) {
+                if outboxLoading { ProgressView().controlSize(.small) }
+                if let outboxStatus {
+                    Text(outboxStatus)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Refresh") {
+                    Task { await loadOutbox() }
+                }
+                .controlSize(.small)
+                Button("Flush") {
+                    Task { await flushOutbox() }
+                }
+                .disabled(outboxLoading || outboxEntries.isEmpty)
+                .controlSize(.small)
+            }
+
+            if outboxEntries.isEmpty {
+                Text("No pending or failed sends")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 4) {
+                    ForEach(outboxEntries) { entry in
+                        HStack(spacing: 8) {
+                            Image(systemName: entry.isFailed ? "exclamationmark.triangle.fill" : "clock.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(entry.isFailed ? .orange : .secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(entry.account_email)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                Text(entry.last_error ?? "\(entry.status), attempts \(entry.attempts)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(2)
+                            }
+                            Spacer()
+                            if entry.isFailed {
+                                Button("Retry") {
+                                    Task { await retryOutbox(entry) }
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+        }
+    }
+
+    private func loadOutbox() async {
+        outboxLoading = true
+        defer { outboxLoading = false }
+        do {
+            outboxEntries = try await EmailCLI.shared.outboxList()
+                .filter { $0.isFailed || $0.isPending }
+            outboxStatus = nil
+        } catch {
+            outboxStatus = "Could not load"
+            state.inbox.error = ActionableError.classify(error)
+        }
+    }
+
+    private func retryOutbox(_ entry: OutboxEntry) async {
+        outboxLoading = true
+        defer { outboxLoading = false }
+        do {
+            try await EmailCLI.shared.outboxRetry(id: entry.id)
+            outboxStatus = "Retried"
+            await loadOutbox()
+        } catch {
+            outboxStatus = "Retry failed"
+            state.inbox.error = ActionableError.classify(error)
+        }
+    }
+
+    private func flushOutbox() async {
+        outboxLoading = true
+        defer { outboxLoading = false }
+        do {
+            let result = try await EmailCLI.shared.outboxFlush()
+            outboxStatus = "Sent \(result.sent), failed \(result.failed)"
+            await loadOutbox()
+        } catch {
+            outboxStatus = "Flush failed"
+            state.inbox.error = ActionableError.classify(error)
         }
     }
 

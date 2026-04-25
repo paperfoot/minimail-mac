@@ -106,6 +106,10 @@ actor EmailCLI {
         _ = try await runRaw(args: args, env: [envName: apiKey])
     }
 
+    func testProfile(name: String) async throws {
+        _ = try await runRaw(args: ["profile", "test", name, "--json"])
+    }
+
     /// Register a mailbox (email + profile) with optional default flag.
     func addAccount(email: String, profile: String, makeDefault: Bool = false) async throws {
         var args = ["account", "add", email, "--profile", profile, "--json"]
@@ -306,9 +310,9 @@ actor EmailCLI {
         if let subject { args += ["--subject", subject] }
         if let text { args += ["--text", text] }
         if let html { args += ["--html", html] }
-        if let to { for t in to { args += ["--to", t] } }
-        if let cc { for c in cc { args += ["--cc", c] } }
-        if let bcc { for b in bcc { args += ["--bcc", b] } }
+        if let to { args += to.isEmpty ? ["--to", ""] : to.flatMap { ["--to", $0] } }
+        if let cc { args += cc.isEmpty ? ["--cc", ""] : cc.flatMap { ["--cc", $0] } }
+        if let bcc { args += bcc.isEmpty ? ["--bcc", ""] : bcc.flatMap { ["--bcc", $0] } }
         if let attachments {
             if attachments.isEmpty {
                 args += ["--clear-attachments"]
@@ -329,8 +333,9 @@ actor EmailCLI {
         return env.data?.signature
     }
 
-    func setSignature(_ text: String, for account: String) async throws {
-        _ = try await runRaw(args: ["signature", "set", account, "--text", text, "--json"])
+    func setSignature(_ value: String, isHTML: Bool, for account: String) async throws {
+        let flag = isHTML ? "--html" : "--text"
+        _ = try await runRaw(args: ["signature", "set", account, flag, value, "--json"])
     }
 
     func setDefaultAccount(_ email: String) async throws {

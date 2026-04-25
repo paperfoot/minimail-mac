@@ -23,14 +23,20 @@ if [ ! -f "${BIN}" ]; then
 fi
 
 # ── Locate email-cli binary to embed ──────────────────────────────────
-# Order: sibling release build > installed homebrew/cargo > bail.
+# Prefer the sibling source checkout and build it fresh so packaging cannot
+# silently embed a stale helper from PATH or an old target/release artifact.
 EMAIL_CLI=""
+if [ -f "../email-cli/Cargo.toml" ]; then
+    echo "▸ cargo build --release (../email-cli)"
+    (cd ../email-cli && cargo build --release)
+    EMAIL_CLI="../email-cli/target/release/email-cli"
+fi
+
 for candidate in \
-    "../email-cli/target/release/email-cli" \
     "/opt/homebrew/bin/email-cli" \
     "/usr/local/bin/email-cli" \
     "${HOME}/.cargo/bin/email-cli"; do
-    if [ -x "${candidate}" ]; then
+    if [ -z "${EMAIL_CLI}" ] && [ -x "${candidate}" ]; then
         EMAIL_CLI="${candidate}"
         break
     fi
@@ -38,6 +44,11 @@ done
 
 if [ -z "${EMAIL_CLI}" ]; then
     echo "⚠ no email-cli binary found to embed — the shipped app will fall back to PATH"
+else
+    if ! "${EMAIL_CLI}" signature set --help | grep -q -- "--html"; then
+        echo "✗ email-cli at ${EMAIL_CLI} is missing the signature --html contract" >&2
+        exit 1
+    fi
 fi
 
 # ── Build the .app layout ─────────────────────────────────────────────
