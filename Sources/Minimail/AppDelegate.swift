@@ -80,8 +80,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// compose so their UI doesn't jitter during typing.
     private func startPollingForNewMail() {
         pollTimer?.invalidate()
-        let interval = max(30, UserDefaults.standard.integer(forKey: SettingsKey.syncIntervalSeconds))
-        let seconds = interval == 0 ? 60 : interval
+        let storedInterval = UserDefaults.standard.integer(forKey: SettingsKey.syncIntervalSeconds)
+        let seconds = storedInterval == 0 ? 60 : max(30, storedInterval)
         pollTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(seconds), repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }

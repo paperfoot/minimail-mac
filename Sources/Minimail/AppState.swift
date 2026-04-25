@@ -457,6 +457,7 @@ final class AppState {
     /// `pull: false` is a local-only re-render (after mark-read, archive, send).
     func refreshInbox(pull: Bool = true) async {
         guard !session.accounts.isEmpty else { return }
+        guard inbox.syncState != .syncing else { return }
         inbox.syncState = .syncing
         defer { inbox.syncState = .idle }
 

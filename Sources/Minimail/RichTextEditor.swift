@@ -23,7 +23,7 @@ struct RichTextEditor: NSViewRepresentable {
     @Binding var attributedText: NSAttributedString
     /// Called after each edit so the parent can schedule autosave without
     /// needing to observe the binding directly.
-    var onEdit: (() -> Void)?
+    var onEdit: (() -> Void)? = nil
     /// Optional handle that stores a weak pointer to the NSTextView so a
     /// sibling toolbar can dispatch formatting actions to it.
     var handle: RichTextEditorHandle?
