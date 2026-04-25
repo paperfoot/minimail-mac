@@ -441,13 +441,14 @@ struct ComposeView: View {
         let sender = state.compose.fromOverride ?? state.composeFromAccount
         if let sig = sender?.signature,
            !sig.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let preview = SignatureFormatting.displayText(from: sig)
             VStack(alignment: .leading, spacing: 0) {
                 Divider().opacity(0.1)
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "signature")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    Text(sig)
+                    Text(preview)
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .lineLimit(3)

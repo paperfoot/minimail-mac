@@ -6,12 +6,6 @@
 
 <br />
 
-[![Star this repo](https://img.shields.io/github/stars/paperfoot/minimail-mac?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/minimail-mac/stargazers)
-&nbsp;&nbsp;
-[![Follow @longevityboris](https://img.shields.io/badge/Follow_%40longevityboris-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/longevityboris)
-
-<br />
-
 [![macOS](https://img.shields.io/badge/macOS-26%20Tahoe-black?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![SwiftUI](https://img.shields.io/badge/SwiftUI-6-orange?style=for-the-badge&logo=swift&logoColor=white)](https://developer.apple.com/xcode/swiftui/)
 [![Powered by email-cli](https://img.shields.io/badge/Powered_by-email--cli-blue?style=for-the-badge)](https://github.com/paperfoot/email-cli)
@@ -160,14 +154,6 @@ Proprietary. See [LICENSE](LICENSE) and [docs/legal/eula.md](docs/legal/eula.md)
 
 <div align="center">
 
-Built by [Boris Djordjevic](https://github.com/longevityboris) at [Paperfoot AI](https://paperfoot.com)
-
-<br />
-
-**If this looks useful to you:**
-
-[![Star this repo](https://img.shields.io/github/stars/paperfoot/minimail-mac?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/minimail-mac/stargazers)
-&nbsp;&nbsp;
-[![Follow @longevityboris](https://img.shields.io/badge/Follow_%40longevityboris-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/longevityboris)
+Author: Paperfoot AI (SG) Pte. Ltd.
 
 </div>

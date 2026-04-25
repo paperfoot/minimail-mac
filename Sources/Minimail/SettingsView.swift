@@ -19,10 +19,11 @@ extension MinimailNotifier {
 
 struct SettingsView: View {
     @Environment(AppState.self) private var state
-    @State private var signatureDraft: String = ""
+    @State private var signatureDraft: NSAttributedString = NSAttributedString()
     @State private var signatureAccount: String?
     @State private var signatureSaving: Bool = false
     @State private var signatureSaved: Date?
+    @State private var signatureEditorHandle = RichTextEditorHandle()
     @AppStorage(SettingsKey.syncIntervalSeconds) private var syncInterval: Int = 60
     @AppStorage(MetricsManager.enabledKey) private var diagnosticsEnabled: Bool = true
 
@@ -174,13 +175,16 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
 
-            TextEditor(text: $signatureDraft)
-                .font(.system(size: 12))
-                .frame(height: 70)
-                .padding(6)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
-                .scrollContentBackground(.hidden)
+            VStack(spacing: 0) {
+                RichTextToolbar(textViewProvider: { signatureEditorHandle.textView })
+                Divider().opacity(0.12)
+                RichTextEditor(
+                    attributedText: $signatureDraft,
+                    handle: signatureEditorHandle
+                )
+                .frame(height: 84)
+            }
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
 
             HStack(spacing: 8) {
                 if signatureSaving { ProgressView().controlSize(.small) }
@@ -208,7 +212,8 @@ struct SettingsView: View {
 
     private func loadSignature(for account: String) async {
         do {
-            signatureDraft = (try await EmailCLI.shared.signature(for: account)) ?? ""
+            let stored = (try await EmailCLI.shared.signature(for: account)) ?? ""
+            signatureDraft = SignatureFormatting.attributed(from: stored)
             signatureSaved = nil
         } catch {
             state.inbox.error = ActionableError.classify(error)
@@ -220,7 +225,8 @@ struct SettingsView: View {
         signatureSaving = true
         defer { signatureSaving = false }
         do {
-            try await EmailCLI.shared.setSignature(signatureDraft, for: account)
+            let stored = SignatureFormatting.storageString(from: signatureDraft)
+            try await EmailCLI.shared.setSignature(stored, for: account)
             signatureSaved = Date()
             Task {
                 try? await Task.sleep(for: .seconds(2))
@@ -326,14 +332,8 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionTitle("About", subtitle: nil)
             kv("Version", Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0")
+            kv("Author", "Paperfoot AI (SG) Pte. Ltd.")
             kv("Engine", state.session.cliPath ?? "email-cli not located")
-            Button {
-                NSWorkspace.shared.open(URL(string: "https://github.com/paperfoot/minimail-mac")!)
-            } label: {
-                Label("GitHub repo", systemImage: "link")
-                    .font(.system(size: 11))
-            }
-            .buttonStyle(.link)
         }
     }
 
