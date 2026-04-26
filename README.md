@@ -8,11 +8,11 @@
 
 [![macOS](https://img.shields.io/badge/macOS-26%20Tahoe-black?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![SwiftUI](https://img.shields.io/badge/SwiftUI-6-orange?style=for-the-badge&logo=swift&logoColor=white)](https://developer.apple.com/xcode/swiftui/)
-[![Powered by email-cli](https://img.shields.io/badge/Powered_by-email--cli-blue?style=for-the-badge)](https://github.com/paperfoot/email-cli)
+[![Powered by email-cli](https://img.shields.io/badge/Powered_by-email--cli-blue?style=for-the-badge)](#two-components)
 
 ---
 
-A 420×580 popover that lives in your menu bar. Glance at the inbox, reply in a sentence, star or snooze a thread, and close it again. Minimail is the human interface for [`email-cli`](https://github.com/paperfoot/email-cli) — the Rust engine that AI agents use to send and receive mail on your behalf.
+A 420×580 popover that lives in your menu bar. Glance at the inbox, reply in a sentence, star or snooze a thread, and close it again. Minimail is the human interface for `email-cli` — the Rust engine that AI agents use to send and receive mail on your behalf.
 
 [Why](#why) | [Two Components](#two-components) | [Install](#install) | [Features](#features) | [Business Model](#business-model)
 
@@ -24,7 +24,7 @@ You gave your AI agent an email address. The agent runs inside whatever harness 
 
 You still want to peek at the inbox sometimes. Reply to a human when the agent flags one. Recap the day without tailing a log file.
 
-Minimail is that peek. Click the menu bar icon, see the inbox, hit `r` to reply, close the popover. That's the interaction. No Dock icon, no splash screen, no onboarding loop.
+Minimail is that peek. Click the menu bar icon, see the inbox, hit `r` to reply, close the popover. First launch asks for the Resend key and sender address; after that it stays out of the Dock and lives in the menu bar.
 
 ## Two Components
 
@@ -32,7 +32,7 @@ Minimail is one half of a product. The other half is a Rust CLI.
 
 | Component | For | Install | License |
 |---|---|---|---|
-| [**email-cli**](https://github.com/paperfoot/email-cli) | AI agents. Any harness that invokes a CLI — Claude Code, Cursor, Codex, Warp, Gemini CLI, shell scripts. | `brew install paperfoot/tap/email-cli` | MIT, free |
+| **email-cli** | AI agents. Any harness that invokes a CLI — Claude Code, Cursor, Codex, Warp, Gemini CLI, shell scripts. | `brew install paperfoot/tap/email-cli` | MIT, free |
 | **Minimail** (this repo) | Humans. Quick visual check of what the agent did. Reply in five seconds, star, snooze, archive. | DMG (paid, coming soon) | Proprietary |
 
 The CLI is the primary interface. It does everything Minimail does — `send`, `inbox ls`, `reply`, `draft`, `broadcast`, 50+ commands in total. Minimail shells out to it for every operation. No business logic lives in the Swift code.
@@ -41,7 +41,7 @@ Think of it as: **email-cli is the backend your agent uses.** **Minimail is the 
 
 ## Business Model
 
-- **email-cli** — MIT, free, distributed via crates.io, Homebrew, and GitHub Releases. It's the agent tool. Agents shouldn't have to pay for the dial tone.
+- **email-cli** — MIT, free, distributed via crates.io, Homebrew, and packaged releases. It's the agent tool. Agents shouldn't have to pay for the dial tone.
 - **Minimail** — paid macOS app. One-time purchase, license key, notarized DMG. It's optional. If you want a GUI for quick human inspection without typing commands, this is the sanctioned one.
 
 On macOS, already using email-cli with an agent? Minimail buys you five-second check-ins instead of `email-cli inbox ls --limit 20 | less`.
@@ -52,7 +52,7 @@ On macOS, already using email-cli with an agent? Minimail buys you five-second c
 
 1. **macOS 26 Tahoe.** Built for Liquid Glass. No backport.
 2. **A Resend account.** That's the only external dependency. Free tier (100 emails/day) is enough to start. Verify a domain in the Resend dashboard and you're done — no SMTP, no IMAP, no OAuth.
-3. **email-cli** is vendored inside the `.app` bundle. Installing it separately via Homebrew is only needed if you also want it on your `PATH` for your agent.
+3. **email-cli** is vendored inside the `.app` bundle. Settings can install/update that same bundled binary onto your user PATH for agents; Homebrew and Cargo are optional.
 
 ### Get Minimail
 
@@ -122,13 +122,13 @@ See [`CLAUDE.md`](CLAUDE.md) for the non-obvious rules we've learned the hard wa
 ## FAQ
 
 **Do I need email-cli installed separately?**
-No. The `.app` bundle ships a vendored copy. Installing `email-cli` via Homebrew is only needed if you also want it on your `PATH` for an agent to call.
+No. The `.app` bundle ships a vendored copy. Open Settings -> Command line tool to install/update that same binary for Terminal and agents.
 
 **What data leaves my machine?**
-Outgoing mail bodies go to Resend. Incoming mail arrives via Resend webhooks. Everything else — drafts, read state, local cache — lives in SQLite on your machine. Minimail itself makes no direct network calls; the CLI does.
+Outgoing mail bodies go to Resend. Incoming mail arrives via Resend webhooks. Everything else — drafts, read state, local cache — lives in SQLite on your machine. Resend API keys live in the macOS Keychain. Minimail itself makes no direct network calls; the CLI does.
 
 **Is this open source?**
-`email-cli` is MIT — fully open. Minimail is paid commercial software. Source is visible so you can audit it, but the license is proprietary. See [LICENSE](LICENSE) and [docs/legal/eula.md](docs/legal/eula.md).
+`email-cli` is MIT. Minimail is paid commercial software. Source is visible so you can audit it, but the license is proprietary. See [LICENSE](LICENSE) and [docs/legal/eula.md](docs/legal/eula.md).
 
 **Is there a Linux or Windows version?**
 No. The CLI works everywhere (`cargo install email-cli`). Minimail is macOS-only and will stay that way — it's a menu bar app built on Apple's Liquid Glass design system.
@@ -144,7 +144,7 @@ MCP adds a network hop, a process-lifecycle problem, and a config burden per age
 
 ## Contributing
 
-Bug reports and feature requests welcome via GitHub Issues. Pull requests are tricky on Minimail since it's commercial software — start with a discussion first. `email-cli` is MIT and accepts PRs directly.
+Bug reports and feature requests: support@paperfoot.com. Pull requests are tricky on Minimail since it's commercial software — start with a discussion first. `email-cli` is MIT and maintained separately.
 
 ## License
 

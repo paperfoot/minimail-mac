@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated: 2026-04-20**
+**Last updated: 2026-04-26**
 **Effective from: TBD (first paid release)**
 
 > This is a draft for review. Before the paid release it should be checked by counsel and hosted at a public URL (for example, `https://paperfoot.com/minimail/privacy`).
@@ -28,7 +28,7 @@ This database contains:
 - Messages you have sent or received through Resend
 - Drafts, attachments, read/unread state, stars, snoozes
 - Account configuration (email addresses, display names, signatures)
-- Your Resend API keys (these will move to the macOS Keychain in a future release — see the repository roadmap)
+- A Keychain sentinel for each profile. The Resend API key itself is stored in the macOS Keychain under the `ai.paperfoot.email-cli` service.
 
 This data never leaves your Mac via Minimail. If you delete the app and the database directory, the data is gone.
 
@@ -68,8 +68,8 @@ Depending on where you live, you may have rights under GDPR, CCPA, or similar la
 ## 9. Security
 
 - Outgoing / incoming mail is delivered over HTTPS to Resend.
-- API keys currently live in the local SQLite database. They will migrate to the macOS Keychain before the paid release.
-- We publish the source of the CLI engine (`email-cli`, MIT-licensed) so you can audit what the app sends where.
+- Resend API keys are stored in the macOS Keychain. The local SQLite database stores only a sentinel that tells the CLI to load the key from Keychain.
+- The CLI engine (`email-cli`) is MIT-licensed and auditable, so you can inspect what the app sends where.
 
 ## 10. Changes
 
@@ -77,5 +77,5 @@ We will update this policy when the product changes. Material changes will be an
 
 ## 11. Contact
 
-Paperfoot AI (SG) Pte. Ltd. (199 Biotechnologies)
+Paperfoot AI (SG) Pte. Ltd.
 Email: `privacy@paperfoot.com`

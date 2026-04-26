@@ -4,6 +4,15 @@ import Foundation
 actor EmailCLI {
     static let shared = EmailCLI()
 
+    struct CommandLineToolStatus: Sendable {
+        let bundledPath: String?
+        let shellPath: String?
+        let shellVersion: String?
+        let installPath: String
+        let isShellUsingBundled: Bool
+        let pathWarning: String?
+    }
+
     enum CLIError: Error, LocalizedError {
         case notFound
         case nonZeroExit(code: Int32, stderr: String)
@@ -17,7 +26,7 @@ actor EmailCLI {
         var errorDescription: String? {
             switch self {
             case .notFound:
-                return "email-cli not found in PATH. Install via: brew install paperfoot/tap/email-cli"
+                return "email-cli was not found in the app bundle or on PATH."
             case .nonZeroExit(let code, let stderr):
                 return "email-cli exited with \(code): \(stderr.prefix(400))"
             case .decode(let err):
@@ -82,6 +91,52 @@ actor EmailCLI {
             return path
         }
         return nil
+    }
+
+    func commandLineToolStatus() async -> CommandLineToolStatus {
+        let bundled = bundledCLIPath()
+        let shellPath = await shellCLIPath()
+        let shellVersion: String?
+        if let shellPath {
+            shellVersion = await cliVersion(shellPath)
+        } else {
+            shellVersion = nil
+        }
+        let installPath = preferredCLIInstallPath(shellPath: shellPath)
+        let isShellUsingBundled = sameFile(shellPath, bundled)
+        let pathWarning: String?
+        if shellPath == nil {
+            pathWarning = "email-cli is not on PATH for Terminal or agents."
+        } else if !isShellUsingBundled {
+            pathWarning = "Terminal is using \(shellPath ?? "another email-cli"), not Minimail's bundled CLI."
+        } else {
+            pathWarning = nil
+        }
+        return CommandLineToolStatus(
+            bundledPath: bundled,
+            shellPath: shellPath,
+            shellVersion: shellVersion,
+            installPath: installPath,
+            isShellUsingBundled: isShellUsingBundled,
+            pathWarning: pathWarning
+        )
+    }
+
+    @discardableResult
+    func installCommandLineTool() async throws -> CommandLineToolStatus {
+        guard let bundled = bundledCLIPath() else { throw CLIError.notFound }
+        let shellPath = await shellCLIPath()
+        let target = preferredCLIInstallPath(shellPath: shellPath)
+        let targetURL = URL(fileURLWithPath: target)
+        let parentURL = targetURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: target) || isSymlink(target) {
+            try fm.removeItem(at: targetURL)
+        }
+        try fm.createSymbolicLink(atPath: target, withDestinationPath: bundled)
+        return await commandLineToolStatus()
     }
 
     // ── High-level calls ───────────────────────────────────────────────────
@@ -559,5 +614,79 @@ actor EmailCLI {
     private func runPlain(_ binary: String, _ args: [String]) async throws -> String {
         let data = try await runPlainData(binary, args)
         return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func cliVersion(_ binary: String) async -> String? {
+        guard let raw = try? await runPlain(binary, ["--version"]) else { return nil }
+        return Self.normalizedVersion(raw)
+    }
+
+    private nonisolated static func normalizedVersion(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = trimmed.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let payload = json["data"] as? [String: Any],
+           let usage = payload["usage"] as? String {
+            return usage.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
+    }
+
+    private nonisolated func bundledCLIPath() -> String? {
+        guard let bundleURL = Bundle.main.url(forAuxiliaryExecutable: "email-cli"),
+              FileManager.default.isExecutableFile(atPath: bundleURL.path) else {
+            return nil
+        }
+        return bundleURL.path
+    }
+
+    private func shellCLIPath() async -> String? {
+        if let resolved = try? await runPlain("/bin/zsh", ["-lc", "command -v email-cli 2>/dev/null || true"]) {
+            let path = resolved
+                .split(whereSeparator: \.isNewline)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { $0.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: $0) }
+            if let path { return path }
+        }
+
+        if let resolved = try? await runPlain("/usr/bin/which", ["email-cli"]) {
+            let path = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+            return path.isEmpty ? nil : path
+        }
+        return nil
+    }
+
+    private nonisolated func preferredCLIInstallPath(shellPath: String?) -> String {
+        let home = NSHomeDirectory()
+        if let shellPath,
+           shellPath.hasPrefix(home + "/"),
+           FileManager.default.isWritableFile(atPath: shellPath) {
+            return shellPath
+        }
+        let cargoBin = "\(home)/.cargo/bin"
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: cargoBin, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return "\(cargoBin)/email-cli"
+        }
+        return "\(home)/.local/bin/email-cli"
+    }
+
+    private nonisolated func sameFile(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        let fm = FileManager.default
+        if let lhsResolved = try? URL(fileURLWithPath: lhs).resolvingSymlinksInPath().resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier,
+           let rhsResolved = try? URL(fileURLWithPath: rhs).resolvingSymlinksInPath().resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier {
+            return String(describing: lhsResolved) == String(describing: rhsResolved)
+        }
+        return fm.contentsEqual(atPath: lhs, andPath: rhs)
+    }
+
+    private nonisolated func isSymlink(_ path: String) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let fileType = attributes[.type] as? FileAttributeType else {
+            return false
+        }
+        return fileType == .typeSymbolicLink
     }
 }

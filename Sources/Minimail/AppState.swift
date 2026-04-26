@@ -459,7 +459,11 @@ final class AppState {
         guard !session.accounts.isEmpty else { return }
         guard inbox.syncState != .syncing else { return }
         inbox.syncState = .syncing
-        defer { inbox.syncState = .idle }
+        defer {
+            if case .syncing = inbox.syncState {
+                inbox.syncState = .idle
+            }
+        }
 
         do {
             let email = session.currentAccount?.email

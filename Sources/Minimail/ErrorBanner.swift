@@ -89,7 +89,7 @@ struct ErrorBanner: View {
                 return "Rate-limited. Retrying in \(Int(retry))s"
             }
             return "Rate-limited"
-        case .cliMissing: return "email-cli not installed"
+        case .cliMissing: return "email-cli unavailable"
         case .diskFull: return "Disk is full"
         case .fileNotFound: return "File not found"
         case .permissionDenied: return "Permission denied"
@@ -106,7 +106,7 @@ struct ErrorBanner: View {
         case .rateLimited:
             return "Resend briefly throttled the request. We'll retry automatically."
         case .cliMissing:
-            return "brew install paperfoot/tap/email-cli, then reopen Minimail."
+            return "Reinstall Minimail or install email-cli manually."
         case .diskFull:
             return "Free up space on the destination drive and retry."
         case .fileNotFound:

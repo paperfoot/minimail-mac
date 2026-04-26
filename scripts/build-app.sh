@@ -30,6 +30,9 @@ if [ -f "../email-cli/Cargo.toml" ]; then
     echo "▸ cargo build --release (../email-cli)"
     (cd ../email-cli && cargo build --release)
     EMAIL_CLI="../email-cli/target/release/email-cli"
+elif [ "${MINIMAIL_REQUIRE_SIBLING_CLI:-0}" = "1" ]; then
+    echo "✗ ../email-cli source checkout is required for release packaging" >&2
+    exit 1
 fi
 
 for candidate in \
