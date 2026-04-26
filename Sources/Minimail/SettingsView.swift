@@ -34,6 +34,8 @@ struct SettingsView: View {
     @State private var outboxEntries: [OutboxEntry] = []
     @State private var outboxLoading: Bool = false
     @State private var outboxStatus: String?
+    @State private var cliToolStatus: EmailCLI.CommandLineToolStatus?
+    @State private var cliToolInstalling: Bool = false
     @AppStorage(SettingsKey.syncIntervalSeconds) private var syncInterval: Int = 60
     @AppStorage(MetricsManager.enabledKey) private var diagnosticsEnabled: Bool = true
 
@@ -52,6 +54,8 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     accountsSection
+                    Divider().opacity(0.15)
+                    commandLineToolSection
                     Divider().opacity(0.15)
                     apiKeySection
                     Divider().opacity(0.15)
@@ -77,6 +81,7 @@ struct SettingsView: View {
             loadSignatureForCurrentAccount()
             loadLaunchAtLoginState()
             loadAPIKeyProfile()
+            Task { await refreshCommandLineToolStatus() }
             Task { await loadOutbox() }
         }
     }
@@ -155,6 +160,82 @@ struct SettingsView: View {
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
             }
             .padding(.top, 4)
+        }
+    }
+
+    // ── Command line tool ────────────────────────────────────────────────
+
+    private var commandLineToolSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("Command line tool", subtitle: "Make email-cli available to agents and Terminal")
+
+            VStack(alignment: .leading, spacing: 4) {
+                cliPathRow("Bundled", cliToolStatus?.bundledPath ?? state.session.cliPath ?? "Not found")
+                cliPathRow("Terminal", cliToolStatus?.shellPath ?? "Not installed on PATH")
+                if let version = cliToolStatus?.shellVersion {
+                    cliPathRow("Version", version)
+                }
+                if let installPath = cliToolStatus?.installPath {
+                    cliPathRow("Install to", installPath)
+                }
+            }
+
+            if let warning = cliToolStatus?.pathWarning {
+                Text(warning)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 8) {
+                if cliToolInstalling { ProgressView().controlSize(.small) }
+                Spacer()
+                Button {
+                    Task { await refreshCommandLineToolStatus() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Refresh CLI status")
+                .accessibilityLabel("Refresh CLI status")
+
+                Button {
+                    Task { await installCommandLineTool() }
+                } label: {
+                    Label("Install", systemImage: "terminal")
+                }
+                .disabled(cliToolInstalling || cliToolStatus?.bundledPath == nil)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func cliPathRow(_ key: String, _ value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(key)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .frame(width: 48, alignment: .leading)
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    private func refreshCommandLineToolStatus() async {
+        cliToolStatus = await EmailCLI.shared.commandLineToolStatus()
+    }
+
+    private func installCommandLineTool() async {
+        cliToolInstalling = true
+        defer { cliToolInstalling = false }
+        do {
+            cliToolStatus = try await EmailCLI.shared.installCommandLineTool()
+        } catch {
+            state.inbox.error = ActionableError.classify(error)
+            await refreshCommandLineToolStatus()
         }
     }
 

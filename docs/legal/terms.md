@@ -1,6 +1,6 @@
 # Terms of Service
 
-**Last updated: 2026-04-20**
+**Last updated: 2026-04-26**
 **Effective from: TBD (first paid release)**
 
 > This is a draft for review. Before the paid release it should be checked by counsel and hosted at a public URL (for example, `https://paperfoot.com/minimail/terms`).
@@ -80,5 +80,5 @@ We may update these terms. Material changes will be announced in the release not
 
 ## 12. Contact
 
-Paperfoot AI (SG) Pte. Ltd. (199 Biotechnologies)
+Paperfoot AI (SG) Pte. Ltd.
 Email: `legal@paperfoot.com`

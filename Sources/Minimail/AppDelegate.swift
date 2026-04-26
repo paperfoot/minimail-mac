@@ -249,7 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Paste",
                          action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         let pasteMatch = editMenu.addItem(withTitle: "Paste and Match Style",
-                                          action: Selector(("pasteAsPlainText:")),
+                                          action: #selector(NSTextView.pasteAsPlainText(_:)),
                                           keyEquivalent: "v")
         pasteMatch.keyEquivalentModifierMask = [.command, .option, .shift]
         editMenu.addItem(withTitle: "Delete",
@@ -266,11 +266,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let formatMenu = NSMenu(title: "Format")
         formatItem.submenu = formatMenu
         let bold = formatMenu.addItem(withTitle: "Bold",
-                                      action: Selector(("addFontTrait:")),
+                                      action: #selector(NSFontManager.addFontTrait(_:)),
                                       keyEquivalent: "b")
         bold.tag = 2  // NSFontManager.addFontTrait reads tag → boldFontMask
         let italic = formatMenu.addItem(withTitle: "Italic",
-                                        action: Selector(("addFontTrait:")),
+                                        action: #selector(NSFontManager.addFontTrait(_:)),
                                         keyEquivalent: "i")
         italic.tag = 1  // italicFontMask
         formatMenu.addItem(withTitle: "Underline",

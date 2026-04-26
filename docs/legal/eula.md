@@ -1,6 +1,6 @@
 # End User License Agreement (EULA)
 
-**Last updated: 2026-04-20**
+**Last updated: 2026-04-26**
 **Effective from: TBD (first paid release)**
 
 > This is a draft for review. Before the paid release it should be checked by counsel and referenced from the top-level `LICENSE` file of this repository.
@@ -76,5 +76,5 @@ Together with the [Terms of Service](terms.md) and [Privacy Policy](privacy.md),
 
 ## 11. Contact
 
-Paperfoot AI (SG) Pte. Ltd. (199 Biotechnologies)
+Paperfoot AI (SG) Pte. Ltd.
 Email: `legal@paperfoot.com`

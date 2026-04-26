@@ -122,17 +122,18 @@ struct NeedsInstallView: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "terminal.fill").font(.system(size: 40)).opacity(0.5)
-            Text("email-cli not found").font(.headline)
-            Text("Install the CLI that powers Minimail:")
+            Text("email-cli missing").font(.headline)
+            Text("Reinstall Minimail, or install the CLI manually:")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Text("brew install paperfoot/tap/email-cli")
                 .font(.system(.callout, design: .monospaced))
                 .padding(8)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-            Text("Then open Minimail again.")
+            Text("The release app normally includes email-cli inside the bundle.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -192,14 +193,7 @@ struct OnboardingView: View {
             .buttonStyle(.borderedProminent)
             .disabled(inFlight || apiKey.isEmpty || !email.looksLikeEmail)
 
-            // Widget scope: account management happens via the Terminal
-            // CLI (`email-cli account add …`), not the in-app Settings
-            // UI. Onboarding used to promise "add more accounts from
-            // Settings" which didn't match reality — Settings only
-            // surfaces default-account + signature today. Keeping the
-            // Terminal path as the single source of truth until the
-            // future full app ships in-app add/remove.
-            Text("To add another account later, run `email-cli account add …` in Terminal.")
+            Text("Settings can repair the key, install the CLI for agents, and add more accounts via a copyable command.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)

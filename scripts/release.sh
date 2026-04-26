@@ -7,8 +7,8 @@
 # Usage: ./scripts/release.sh 0.1.9
 #
 # Required environment:
-#   SIGNING_IDENTITY   e.g. "Developer ID Application: SUPER SIMPLE LEARNING LTD (S25N6MXJCF)"
-#                      (defaults to the SSLL team cert)
+#   SIGNING_IDENTITY   e.g. "Developer ID Application: Paperfoot AI (SG) Pte. Ltd. (TEAMID)"
+#   APPLE_TEAM_ID      Apple Developer Team ID that owns the signing identity
 #   NOTARY_PROFILE     keychain profile name for notarytool (default: "minimail-notary")
 #
 # One-time setup (before first release):
@@ -20,7 +20,7 @@
 #      securely (keeps the app-specific password out of shell history):
 #        xcrun notarytool store-credentials minimail-notary \
 #            --apple-id "<your-apple-id-email>" \
-#            --team-id "S25N6MXJCF"
+#            --team-id "<APPLE_TEAM_ID>"
 #      The profile "minimail-notary" then works without further auth.
 #
 # Optional env:
@@ -45,10 +45,11 @@ APP_DIR=".build/${APP_NAME}.app"
 APP_ZIP=".build/${APP_NAME}-${VERSION}.zip"
 DMG_NAME="Minimail-${VERSION}.dmg"
 DMG_PATH=".build/${DMG_NAME}"
-TEAM_ID="S25N6MXJCF"
 GH_REPO="paperfoot/minimail-mac"
 
-: "${SIGNING_IDENTITY:=Developer ID Application: SUPER SIMPLE LEARNING LTD (${TEAM_ID})}"
+: "${APPLE_TEAM_ID:?Set APPLE_TEAM_ID to the Apple Developer Team ID for Paperfoot AI (SG) Pte. Ltd.}"
+: "${SIGNING_IDENTITY:?Set SIGNING_IDENTITY to the Developer ID Application certificate for Paperfoot AI (SG) Pte. Ltd.}"
+TEAM_ID="${APPLE_TEAM_ID}"
 : "${NOTARY_PROFILE:=minimail-notary}"
 : "${NOTARIZE:=1}"
 : "${SKIP_GH:=0}"
@@ -117,7 +118,7 @@ if [ "${CURRENT_VERSION}" != "${VERSION}" ]; then
 fi
 
 # ── Build + sign the .app with the bundled helper ─────────────────────
-SIGNING_IDENTITY="${SIGNING_IDENTITY}" ./scripts/build-app.sh release
+MINIMAIL_REQUIRE_SIBLING_CLI=1 SIGNING_IDENTITY="${SIGNING_IDENTITY}" ./scripts/build-app.sh release
 
 # Sanity — the embedded helper is what makes distribution work.
 # Helper lives in Contents/MacOS/ per Apple's Bundle Programming Guide.
@@ -243,8 +244,8 @@ fi
 
 # ── SKIP_GH=1 exit path ───────────────────────────────────────────────
 if [ "${SKIP_GH}" = "1" ]; then
-    # Warn if the version bump left the tree dirty so Boris doesn't carry
-    # it into the next release by accident.
+    # Warn if the version bump left the tree dirty so it does not carry
+    # into the next release by accident.
     if ! git diff --quiet -- "${PLIST}" 2>/dev/null \
        || ! git diff --cached --quiet -- "${PLIST}" 2>/dev/null; then
         echo "" >&2

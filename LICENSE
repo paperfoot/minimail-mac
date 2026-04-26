@@ -1,6 +1,6 @@
 Minimail — Proprietary License
 
-Copyright (c) 2026 Paperfoot AI (SG) Pte. Ltd. (199 Biotechnologies).
+Copyright (c) 2026 Paperfoot AI (SG) Pte. Ltd.
 All rights reserved.
 
 Minimail is proprietary commercial software. Its use is governed by the
@@ -16,8 +16,6 @@ audit. Its visibility does not grant any rights beyond those expressly
 set out in the EULA. Minimail is not open source.
 
 The companion CLI engine, `email-cli`, is distributed separately under
-the MIT license:
-
-    https://github.com/paperfoot/email-cli
+the MIT license.
 
 Contact: legal@paperfoot.com
