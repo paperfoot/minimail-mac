@@ -52,12 +52,14 @@ if [[ "${version}" == email-cli* ]] || printf '%s' "${version}" | python3 -c "im
 else
   fail_item "version output unexpected: ${version}"
 fi
-if "${CLI}" signature set --help | grep -q -- "--html"; then
+signature_help="$("${CLI}" signature set --help)"
+if [[ "${signature_help}" == *"--html"* ]]; then
   pass_item "signature set supports --html"
 else
   fail_item "signature set missing --html"
 fi
-if "${CLI}" draft create --help | grep -q -- "--reply-to-msg"; then
+draft_help="$("${CLI}" draft create --help)"
+if [[ "${draft_help}" == *"--reply-to-msg"* ]]; then
   pass_item "draft create supports --reply-to-msg"
 else
   fail_item "draft create missing --reply-to-msg"

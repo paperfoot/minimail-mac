@@ -126,6 +126,7 @@ final class ReaderState {
     var error: String?
     var isLoading: Bool = false
     var attachments: [Attachment] = []
+    var attachmentsByMessageID: [Int64: [Attachment]] = [:]
     /// Task owning the currently-running fetch so we can cancel on navigation.
     var inflight: Task<Void, Never>?
     /// All messages in the current thread, oldest → newest. Contains at least
@@ -145,6 +146,10 @@ final class ReaderState {
     /// HTML body. Populated once per navigation; avoids compiling an
     /// `NSRegularExpression` on every render of the reader footer.
     var trackerCount: Int = 0
+
+    func attachments(for messageID: Int64) -> [Attachment] {
+        attachmentsByMessageID[messageID] ?? []
+    }
 }
 
 @MainActor
@@ -607,6 +612,7 @@ final class AppState {
         // Batch the synchronous reset writes — all in one tick, one redraw.
         reader.isLoading = true
         reader.attachments = []
+        reader.attachmentsByMessageID = [:]
         reader.thread = []
         reader.expandedThreadIDs = [id]
 
@@ -645,9 +651,28 @@ final class AppState {
             async let threadTask = self.cli.readThread(id: id)
             let attachments = (try? await attachmentsTask) ?? []
             let thread = (try? await threadTask) ?? []
+            var attachmentMap = [id: attachments]
+            let siblingAttachmentIDs = thread
+                .filter { $0.id != id && $0.has_attachments == true }
+                .map(\.id)
+            if !siblingAttachmentIDs.isEmpty {
+                let cli = self.cli
+                await withTaskGroup(of: (Int64, [Attachment]).self) { group in
+                    for messageID in siblingAttachmentIDs {
+                        group.addTask {
+                            let list = (try? await cli.listAttachments(messageID: messageID)) ?? []
+                            return (messageID, list)
+                        }
+                    }
+                    for await (messageID, list) in group {
+                        attachmentMap[messageID] = list
+                    }
+                }
+            }
             if Task.isCancelled { return }
 
             self.reader.attachments = attachments
+            self.reader.attachmentsByMessageID = attachmentMap
             if thread.count > 1 {
                 // Splice the full-body message back at its position — the
                 // thread endpoint returns lightweight summaries without

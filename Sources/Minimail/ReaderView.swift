@@ -234,8 +234,9 @@ struct ReaderView: View {
             .padding(.vertical, 10)
         Divider().opacity(0.3)
         body(for: msg)
-        if !state.reader.attachments.isEmpty {
-            attachmentsBar(messageID: msg.id)
+        let attachments = state.reader.attachments(for: msg.id)
+        if !attachments.isEmpty {
+            attachmentsBar(messageID: msg.id, attachments: attachments)
         }
     }
 
@@ -264,8 +265,9 @@ struct ReaderView: View {
                     .padding(.vertical, 10)
                 Divider().opacity(0.25)
                 body(for: m)
-                if m.id == focusedID && !state.reader.attachments.isEmpty {
-                    attachmentsBar(messageID: m.id)
+                let attachments = state.reader.attachments(for: m.id)
+                if !attachments.isEmpty {
+                    attachmentsBar(messageID: m.id, attachments: attachments)
                 }
                 Divider().opacity(0.2)
             } else {
@@ -311,18 +313,18 @@ struct ReaderView: View {
         }
     }
 
-    private func attachmentsBar(messageID: Int64) -> some View {
+    private func attachmentsBar(messageID: Int64, attachments: [Attachment]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 Image(systemName: "paperclip")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
-                Text("\(state.reader.attachments.count) attachment\(state.reader.attachments.count == 1 ? "" : "s")")
+                Text("\(attachments.count) attachment\(attachments.count == 1 ? "" : "s")")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
             FlowLayout(spacing: 6) {
-                ForEach(state.reader.attachments) { att in
+                ForEach(attachments) { att in
                     AttachmentChip(attachment: att) {
                         saveAttachment(att, messageID: messageID)
                     }
