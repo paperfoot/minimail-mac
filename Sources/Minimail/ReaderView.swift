@@ -5,11 +5,9 @@ struct ReaderView: View {
     @Environment(AppState.self) private var state
     /// Per-message opt-in for remote content (images / stylesheets / fonts
     /// that the privacy filter normally blocks). Reset whenever the user
-    /// navigates to a different message — the choice must NEVER persist
-    /// across messages, or we'd silently re-enable tracking for a message
-    /// the user hasn't seen yet. `onChange(of: state.reader.loaded?.id)`
-    /// below enforces the reset.
-    @State private var remoteContentAllowed: Bool = false
+    /// navigates to a different root message; within a thread, each message
+    /// must be explicitly allowed.
+    @State private var remoteContentAllowedIDs: Set<Int64> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,10 +16,10 @@ struct ReaderView: View {
             content
             footer
         }
-        // Per-message reset: the moment the user j/k's or taps another
-        // message, drop the allowance so the next message starts blocked.
-        .onChange(of: state.reader.loaded?.id) { _, _ in
-            if remoteContentAllowed { remoteContentAllowed = false }
+        // Root-message reset: the moment the user j/k's or taps another
+        // inbox row, drop allowances so the next thread starts blocked.
+        .onChange(of: messageID) { _, _ in
+            remoteContentAllowedIDs.removeAll()
         }
     }
 
@@ -177,10 +175,6 @@ struct ReaderView: View {
         if let msg = state.reader.loaded {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if msg.hasUnsubscribeLink {
-                        unsubscribeRibbon(msg)
-                        Divider().opacity(0.2)
-                    }
                     if state.reader.thread.count > 1 {
                         threadStack(focusedID: msg.id)
                     } else {
@@ -229,6 +223,10 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func singleMessage(_ msg: Message) -> some View {
+        if msg.hasUnsubscribeLink {
+            unsubscribeRibbon(msg)
+            Divider().opacity(0.2)
+        }
         fromRow(msg)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -260,7 +258,15 @@ struct ReaderView: View {
         ForEach(state.reader.thread) { m in
             let expanded = state.reader.expandedThreadIDs.contains(m.id) || m.id == focusedID
             if expanded {
+                if m.hasUnsubscribeLink {
+                    unsubscribeRibbon(m)
+                    Divider().opacity(0.2)
+                }
                 fromRow(m)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        state.focusThreadMessage(m.id)
+                    }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                 Divider().opacity(0.25)
@@ -287,12 +293,13 @@ struct ReaderView: View {
             // HTMLBodyView self-sizes to its content height now — don't add
             // a fixed `.frame(minHeight:)` here or it caps short messages
             // and reintroduces the inner-scrollbar problem we just fixed.
-            // The `remoteContentAllowed` flag is per-message (see ReaderView
-            // @State) and only flips when the user explicitly clicks the
-            // "Load remote content" button in the footer.
+            let remoteContentAllowed = remoteContentAllowedIDs.contains(msg.id)
+            if state.reader.remoteContentCount(for: msg.id) > 0 {
+                remoteContentControl(for: msg, isAllowed: remoteContentAllowed)
+            }
             HTMLBodyView(
                 html: html,
-                remoteContentAllowed: remoteContentAllowed && msg.id == state.reader.loaded?.id
+                remoteContentAllowed: remoteContentAllowed
             )
         } else if let text = msg.text_body, !text.isEmpty {
             Text(text)
@@ -311,6 +318,32 @@ struct ReaderView: View {
                 .foregroundStyle(.secondary)
                 .padding(16)
         }
+    }
+
+    private func remoteContentControl(for msg: Message, isAllowed: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: isAllowed ? "shield.slash" : "shield.lefthalf.filled")
+                .font(.system(size: 10))
+            if isAllowed {
+                Text("Remote content loaded")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                Button("Load remote content") {
+                    remoteContentAllowedIDs.insert(msg.id)
+                    state.focusThreadMessage(msg.id)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .accessibilityLabel("Load remote content for this message")
+            }
+            Spacer()
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.03))
     }
 
     private func attachmentsBar(messageID: Int64, attachments: [Attachment]) -> some View {
@@ -403,12 +436,6 @@ struct ReaderView: View {
     }
 
     private var footer: some View {
-        // Tracker count + position label are pre-computed in
-        // `AppState.updateReaderDerived(for:)` (called from `open()`). This
-        // avoids running `NSRegularExpression` + `inbox.visible()` on every
-        // reader re-render — both were showing up in Instruments profiles
-        // as hot paths during the open spring animation.
-        let trackerCount = state.reader.trackerCount
         let positionLabel = state.reader.positionLabel
         return HStack(spacing: 8) {
             if let msg = state.reader.loaded {
@@ -417,39 +444,6 @@ struct ReaderView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-            }
-            // The privacy filter blocks ALL remote resources (images,
-            // stylesheets, fonts, media) — not just tracking pixels — so
-            // the old "Blocked N trackers" wording was misleading.
-            // Accurate framing: "Remote content blocked — click to load".
-            // Clicking opts in for THIS message only; the @State resets
-            // to false as soon as the user moves to another message.
-            if trackerCount > 0 {
-                if remoteContentAllowed {
-                    HStack(spacing: 3) {
-                        Image(systemName: "shield.slash")
-                            .font(.system(size: 9))
-                        Text("Remote content loaded")
-                            .font(.system(size: 10))
-                    }
-                    .foregroundStyle(.tertiary)
-                    .help("Images and styles loaded for this message only")
-                } else {
-                    Button {
-                        remoteContentAllowed = true
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "shield.lefthalf.filled")
-                                .font(.system(size: 9))
-                            Text("Remote content blocked — click to load")
-                                .font(.system(size: 10))
-                        }
-                        .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Load images and styles for this message only")
-                    .accessibilityLabel("Load remote content for this message")
-                }
             }
             Spacer()
             if let label = positionLabel {

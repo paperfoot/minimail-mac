@@ -127,6 +127,7 @@ final class ReaderState {
     var isLoading: Bool = false
     var attachments: [Attachment] = []
     var attachmentsByMessageID: [Int64: [Attachment]] = [:]
+    var remoteContentCountsByMessageID: [Int64: Int] = [:]
     /// Task owning the currently-running fetch so we can cancel on navigation.
     var inflight: Task<Void, Never>?
     /// All messages in the current thread, oldest → newest. Contains at least
@@ -142,13 +143,13 @@ final class ReaderState {
     /// need to call `inbox.visible()` (filter+sort over 100+ messages) on
     /// every re-render of the reader.
     var positionLabel: String?
-    /// Pre-computed count of blocked remote images in the current message's
-    /// HTML body. Populated once per navigation; avoids compiling an
-    /// `NSRegularExpression` on every render of the reader footer.
-    var trackerCount: Int = 0
 
     func attachments(for messageID: Int64) -> [Attachment] {
         attachmentsByMessageID[messageID] ?? []
+    }
+
+    func remoteContentCount(for messageID: Int64) -> Int {
+        remoteContentCountsByMessageID[messageID] ?? 0
     }
 }
 
@@ -599,12 +600,14 @@ final class AppState {
         } else {
             reader.positionLabel = nil
         }
+        let remoteContentCount: Int
         if let html = message.html_body, !html.isEmpty {
             let range = NSRange(html.startIndex..., in: html)
-            reader.trackerCount = Self.trackingRegex.numberOfMatches(in: html, range: range)
+            remoteContentCount = Self.trackingRegex.numberOfMatches(in: html, range: range)
         } else {
-            reader.trackerCount = 0
+            remoteContentCount = 0
         }
+        reader.remoteContentCountsByMessageID[message.id] = remoteContentCount
     }
 
     private func loadFullMessage(id: Int64) {
@@ -613,6 +616,7 @@ final class AppState {
         reader.isLoading = true
         reader.attachments = []
         reader.attachmentsByMessageID = [:]
+        reader.remoteContentCountsByMessageID = [:]
         reader.thread = []
         reader.expandedThreadIDs = [id]
 
@@ -696,8 +700,33 @@ final class AppState {
         // If the summary version is already in `thread`, just fetch the body
         // and splice it in so the view updates.
         guard let idx = reader.thread.firstIndex(where: { $0.id == id }) else { return }
-        if let full = try? await cli.readMessage(id: id, markRead: false) {
+        let wasUnread = reader.thread[idx].isUnread
+        if let full = try? await cli.readMessage(id: id, markRead: true) {
             reader.thread[idx] = full
+            reader.loaded = full
+            updateReaderDerived(for: full)
+            if wasUnread {
+                markMessageReadLocally(id: id)
+            }
+        }
+    }
+
+    func focusThreadMessage(_ id: Int64) {
+        guard let message = reader.thread.first(where: { $0.id == id }) else { return }
+        reader.loaded = message
+        updateReaderDerived(for: message)
+    }
+
+    private func markMessageReadLocally(id: Int64) {
+        if let idx = inbox.messages.firstIndex(where: { $0.id == id }) {
+            let wasUnread = inbox.messages[idx].isUnread
+            inbox.messages[idx].is_read = true
+            if wasUnread {
+                inbox.totalUnread = max(0, inbox.totalUnread - 1)
+            }
+        }
+        if let idx = reader.thread.firstIndex(where: { $0.id == id }) {
+            reader.thread[idx].is_read = true
         }
     }
 
