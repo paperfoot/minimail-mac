@@ -302,7 +302,7 @@ actor EmailCLI {
     }
 
     func downloadAttachment(messageID: Int64, attachmentID: String, to path: URL) async throws {
-        let args = ["attachments", "get", String(messageID), attachmentID, "--output", path.path, "--json"]
+        let args = ["attachments", "get", String(messageID), attachmentID, "--output-file", path.path, "--json"]
         _ = try await runRaw(args: args)
     }
 

@@ -71,6 +71,33 @@ struct ModelDecodingTests {
         #expect(m.in_reply_to != nil)
     }
 
+    @Test("attachment list decodes stable string IDs")
+    func attachmentList() throws {
+        let json = """
+        {
+          "version": "1",
+          "status": "success",
+          "data": [
+            {
+              "id": "2a0c9ce0-3112-4728-976e-47ddcd16a318",
+              "row_id": 12,
+              "message_id": 77,
+              "remote_attachment_id": "2a0c9ce0-3112-4728-976e-47ddcd16a318",
+              "filename": "invoice.pdf",
+              "content_type": "application/pdf",
+              "size": 4096,
+              "downloaded": true
+            }
+          ]
+        }
+        """
+        let env = try decoder.decode(Envelope<[Minimail.Attachment]>.self, from: Data(json.utf8))
+        let attachment = try #require(env.data?.first)
+        #expect(attachment.id == "2a0c9ce0-3112-4728-976e-47ddcd16a318")
+        #expect(attachment.filename == "invoice.pdf")
+        #expect(attachment.downloaded == true)
+    }
+
     @Test("fromParts splits Name <email> correctly")
     func fromPartsSplit() throws {
         let env = try decoder.decode(

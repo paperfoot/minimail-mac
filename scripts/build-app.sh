@@ -48,7 +48,8 @@ done
 if [ -z "${EMAIL_CLI}" ]; then
     echo "⚠ no email-cli binary found to embed — the shipped app will fall back to PATH"
 else
-    if ! "${EMAIL_CLI}" signature set --help | grep -q -- "--html"; then
+    signature_help="$("${EMAIL_CLI}" signature set --help)"
+    if [[ "${signature_help}" != *"--html"* ]]; then
         echo "✗ email-cli at ${EMAIL_CLI} is missing the signature --html contract" >&2
         exit 1
     fi
