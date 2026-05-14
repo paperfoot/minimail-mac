@@ -381,6 +381,20 @@ struct ReaderView: View {
         let parts = msg.fromParts
         let toList = msg.to ?? []
         let ccList = msg.cc ?? []
+        let bccList = msg.bcc ?? []
+        let replyToList = msg.reply_to ?? []
+        let isSent = msg.direction == "sent"
+        // Reply-To only matters when it actually redirects replies to a
+        // different mailbox than From. If they match, the header is
+        // redundant noise; if they differ, the user MUST see it or they'll
+        // think they're replying to the sender and silently hit a list /
+        // bot / different person.
+        let replyRedirect: [String]? = {
+            guard !replyToList.isEmpty else { return nil }
+            let fromKey = parts.email.lowercased()
+            let allMatchFrom = replyToList.allSatisfy { $0.emailAddressPart.lowercased() == fromKey }
+            return allMatchFrom ? nil : replyToList
+        }()
         return HStack(alignment: .top, spacing: 10) {
             AccountAvatar(email: parts.email)
                 .scaleEffect(1.4)
@@ -413,12 +427,78 @@ struct ReaderView: View {
                         .lineLimit(1)
                         .help(ccList.joined(separator: ", "))
                 }
+                // Bcc is only meaningful on outbound mail — the protocol
+                // strips Bcc from headers before delivery, so received
+                // messages will never carry it (only the sender knows).
+                if isSent, !bccList.isEmpty {
+                    Text("bcc " + bccList.joined(separator: ", "))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help(bccList.joined(separator: ", "))
+                }
+                // Reply-To redirect — visually distinct so the user can't
+                // miss that "Reply" will land somewhere other than the
+                // sender they see at the top of this card. Mailing lists,
+                // ticketing systems, and shared-inbox tools rely on this
+                // header, and clients that hide it silently send confidential
+                // replies to the wrong audience.
+                if let redirect = replyRedirect {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrowshape.turn.up.left.circle.fill")
+                            .font(.system(size: 10))
+                        Text("Replies go to " + redirect.joined(separator: ", "))
+                            .lineLimit(1)
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .help(redirect.joined(separator: ", "))
+                }
             }
             Spacer()
-            Text(DateFormat.readerHeader(msg.created_at))
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(DateFormat.readerHeader(msg.created_at))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                // "to me" vs "cc me" vs "bcc me" — single-glance signal of
+                // how the user got this message. Lets them judge whether
+                // they're the primary audience or one of many; on a long
+                // list-mail an inbox-zero pass can skip "cc me" faster.
+                if !isSent, let role = recipientRole(of: msg) {
+                    Text(role)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(Color.primary.opacity(0.08))
+                        )
+                }
+                // In multi-account mode, which inbox actually received this
+                // message — otherwise indistinguishable from another account
+                // when the user reads via the unified All-Accounts view.
+                if state.session.accounts.count > 1 {
+                    Text(msg.account_email)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help("Received at " + msg.account_email)
+                }
+            }
         }
+    }
+
+    /// "to me" / "cc me" — only emitted for received mail and only when the
+    /// receiving account is actually addressed. nil falls through to "you got
+    /// this via Bcc / mailing list / forwarded send" without a tag (showing
+    /// "bcc me" on every newsletter would be noise).
+    private func recipientRole(of msg: Message) -> String? {
+        let me = msg.account_email.lowercased()
+        let inTo = (msg.to ?? []).contains { $0.emailAddressPart.lowercased() == me }
+        if inTo { return "to me" }
+        let inCc = (msg.cc ?? []).contains { $0.emailAddressPart.lowercased() == me }
+        if inCc { return "cc me" }
+        return nil
     }
 
     private struct CollapsedThreadRow: View {
