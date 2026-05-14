@@ -15,14 +15,23 @@ import SwiftUI
 ///     popover beneath the field.
 ///   - ↑ / ↓ move the highlight; ⏎ or ⇥ accepts the highlighted suggestion;
 ///     ⎋ dismisses the popover without inserting.
-struct EmailTokenField: View {
+///   - ⇥ with no popover or ⇧⇥ at any time advances/reverses focus — the
+///     field joins its parent's `FocusState` chain so Tab traverses
+///     To → Cc → Bcc → Subject naturally.
+struct EmailTokenField<F: Hashable>: View {
     @Binding var text: String
     var placeholder: String = ""
     var suggestions: [String] = []
+    /// Parent-owned focus chain. Passing this in (rather than holding a
+    /// local `@FocusState`) lets Tab / Shift-Tab traverse between sibling
+    /// fields like To → Cc → Bcc → Subject.
+    var focus: FocusState<F?>.Binding
+    var focusValue: F
 
     @State private var draft: String = ""
     @State private var highlightedIndex: Int = 0
-    @FocusState private var isFocused: Bool
+
+    private var isFocused: Bool { focus.wrappedValue == focusValue }
 
     private var tokens: [String] {
         Self.split(text)
@@ -72,8 +81,16 @@ struct EmailTokenField: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .frame(minWidth: 120)
-                .focused($isFocused)
+                .focused(focus, equals: focusValue)
                 .onChange(of: draft) { _, new in handleDraftChange(new) }
+                .onChange(of: isFocused) { _, focused in
+                    guard !focused else { return }
+                    // Let suggestion-button clicks finish first; if a pick
+                    // clears the draft, this delayed commit becomes a no-op.
+                    DispatchQueue.main.async {
+                        if !isFocused { commitDraft() }
+                    }
+                }
                 .onKeyPress(.downArrow) {
                     guard !filtered.isEmpty else { return .ignored }
                     highlightedIndex = min(filtered.count - 1, highlightedIndex + 1)
@@ -92,12 +109,21 @@ struct EmailTokenField: View {
                     commitDraft()
                     return .handled
                 }
-                .onKeyPress(.tab) {
-                    guard !filtered.isEmpty, filtered.indices.contains(highlightedIndex) else {
-                        return .ignored
+                // Tab handling — closure form so we can inspect modifiers.
+                // Shift-Tab MUST pass through so the system advances focus
+                // backwards (Subject → Bcc → Cc → To). Plain Tab with the
+                // popover open accepts the highlighted suggestion; with no
+                // popover it commits the draft and lets focus advance.
+                .onKeyPress(keys: [.tab], phases: .down) { press in
+                    if press.modifiers.contains(.shift) { return .ignored }
+                    if !filtered.isEmpty, filtered.indices.contains(highlightedIndex) {
+                        pick(filtered[highlightedIndex])
+                        return .handled
                     }
-                    pick(filtered[highlightedIndex])
-                    return .handled
+                    if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        commitDraft()
+                    }
+                    return .ignored
                 }
                 .onKeyPress(.escape) {
                     if !filtered.isEmpty {
@@ -115,6 +141,13 @@ struct EmailTokenField: View {
                     }
                     return .ignored
                 }
+        }
+        // Clicking anywhere in the row (pill gaps, empty area to the right
+        // of the last pill) should land the cursor in the input — without
+        // this, only the small trailing TextField rect accepts clicks.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            focus.wrappedValue = focusValue
         }
     }
 
@@ -150,6 +183,12 @@ struct EmailTokenField: View {
         addToken(email)
         draft = ""
         highlightedIndex = 0
+        // Restore focus after a mouse-click pick — clicking the suggestion
+        // button briefly steals first-responder, leaving the field blurred
+        // and the user unable to type another recipient without re-clicking.
+        DispatchQueue.main.async {
+            focus.wrappedValue = focusValue
+        }
     }
 
     private func addToken(_ email: String) {
