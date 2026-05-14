@@ -13,8 +13,19 @@ struct ComposeView: View {
     /// these. Gmail / Apple Mail / iOS Mail all use this pattern to save
     /// vertical space when the user doesn't need those fields.
     @State private var showCcBcc: Bool = false
+    /// Reply-To row visibility. Toggled from the compose ellipsis menu —
+    /// rare enough that promoting it to the always-on layout would add
+    /// clutter for every user to benefit the few who actually need it.
+    @State private var showReplyTo: Bool = false
+    /// Custom-time picker sheet for "Pick date and time…". Sheet rather
+    /// than inline so the user gets a real DatePicker, not a cramped
+    /// menu-bar control.
+    @State private var showSchedulePicker: Bool = false
+    /// Local mirror of `compose.scheduledAt` while the date picker is up
+    /// — committed to `state.compose.scheduledAt` on "Schedule".
+    @State private var draftScheduledAt: Date = Date().addingTimeInterval(60 * 60)
 
-    enum Field { case to, cc, bcc, subject }
+    enum Field { case to, cc, bcc, replyTo, subject }
 
     /// A warning surfaced on "Send" click that the user must acknowledge.
     struct SendWarning: Identifiable {
@@ -41,6 +52,17 @@ struct ComposeView: View {
                 Divider().opacity(0.1)
                 tokenRow(label: "Bcc", binding: $bound.bcc, field: .bcc)
                     .onChange(of: state.compose.bcc) { _, _ in state.scheduleAutosave() }
+            }
+            // Reply-To row. Hidden until the user enables it from the
+            // header's overflow menu (rare power-user feature) or until
+            // something is already in the field (e.g. after we add draft
+            // persistence in a future round). When set, replies to the
+            // outgoing message route to this address rather than the From
+            // account — the same gotcha the reader's orange ribbon warns
+            // about, surfaced here on the compose side.
+            if showReplyTo || !state.compose.replyTo.isEmpty {
+                Divider().opacity(0.1)
+                tokenRow(label: "Reply-To", binding: $bound.replyTo, field: .replyTo)
             }
             Divider().opacity(0.1)
             textFieldRow(label: "Subject", binding: $bound.subject, field: .subject)
@@ -256,6 +278,20 @@ struct ComposeView: View {
                     Task {
                         await state.flushAutosave()
                         state.router.currentView = .inbox
+                    }
+                }
+                Divider()
+                // Power-user header overrides. Reveal once and stays
+                // visible for the rest of the compose session; the row
+                // disappears again on next compose unless the field had
+                // content (handled by the showReplyTo || !empty test
+                // in the body's reveal condition).
+                if !showReplyTo && state.compose.replyTo.isEmpty {
+                    Button("Add Reply-To…") {
+                        showReplyTo = true
+                        // Focus the new row so the user can start typing
+                        // immediately. One runloop turn so the row exists.
+                        DispatchQueue.main.async { focus = .replyTo }
                     }
                 }
                 Divider()
@@ -504,7 +540,7 @@ struct ComposeView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 8) {
             if let err = state.compose.error {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
@@ -521,13 +557,148 @@ struct ComposeView: View {
 
             Spacer()
 
+            // When scheduled, surface the wake time inline so the user
+            // can't forget. The X clears the schedule back to immediate
+            // send without re-opening the menu.
+            if let at = state.compose.scheduledAt {
+                HStack(spacing: 4) {
+                    Image(systemName: "clock.fill")
+                        .font(.system(size: 9))
+                    Text("Scheduled · \(Self.scheduleSummary.string(from: at))")
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                    Button {
+                        state.compose.scheduledAt = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel schedule and send normally")
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Color.accentColor.opacity(0.12), in: Capsule())
+            }
+
             sendButton
                 .keyboardShortcut(.return, modifiers: .command)
+                .disabled(state.compose.isSending || state.compose.to.splitAddressTokens().isEmpty)
+
+            scheduleMenu
                 .disabled(state.compose.isSending || state.compose.to.splitAddressTokens().isEmpty)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.primary.opacity(0.04))
+        .sheet(isPresented: $showSchedulePicker) {
+            schedulePickerSheet
+        }
+    }
+
+    /// Used for the inline "Scheduled · …" pill in the footer. Medium
+    /// date + short time keeps the chip short enough to share a row
+    /// with the Send button even on the narrow popover layout.
+    private static let scheduleSummary: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
+    /// Chevron-style trailing accessory on the Send button that opens
+    /// the schedule menu. Separate Menu (not a SwiftUI MenuButton
+    /// segment) so the Send button itself keeps its big-click target.
+    @ViewBuilder
+    private var scheduleMenu: some View {
+        Menu {
+            if state.compose.scheduledAt != nil {
+                Button("Send Now (cancel schedule)") {
+                    state.compose.scheduledAt = nil
+                }
+                Divider()
+            }
+            ForEach(Self.scheduleOptions(now: Date()), id: \.label) { option in
+                Button(option.label) {
+                    state.compose.scheduledAt = option.date
+                }
+            }
+            Divider()
+            Button("Pick date and time…") {
+                draftScheduledAt = state.compose.scheduledAt
+                    ?? Date().addingTimeInterval(60 * 60)
+                showSchedulePicker = true
+            }
+        } label: {
+            Image(systemName: "chevron.up")
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Schedule send")
+        .accessibilityLabel("Schedule send")
+    }
+
+    /// Quick-pick schedule options. Computed against `now` so each menu
+    /// open reflects the current clock — "Tomorrow morning" stays
+    /// truthful even if the user left the window open overnight.
+    private static func scheduleOptions(now: Date) -> [(label: String, date: Date)] {
+        let calendar = Calendar.current
+        func nextAt(hour: Int, minute: Int = 0, after base: Date = now) -> Date {
+            var comps = calendar.dateComponents([.year, .month, .day], from: base)
+            comps.hour = hour
+            comps.minute = minute
+            var date = calendar.date(from: comps) ?? base
+            if date <= base { date = calendar.date(byAdding: .day, value: 1, to: date) ?? date }
+            return date
+        }
+        let tomorrowMorning = nextAt(hour: 9)
+        let tomorrowEvening = nextAt(hour: 17)
+        // Next-Monday morning. Calendar weekday: 1 = Sunday on en_US;
+        // .nextDate handles locale-aware first-day-of-week shifts.
+        let mondayMorning = calendar.nextDate(
+            after: now,
+            matching: DateComponents(hour: 9, weekday: 2),
+            matchingPolicy: .nextTime
+        ) ?? now.addingTimeInterval(60 * 60 * 24 * 3)
+        return [
+            ("Tomorrow morning (9:00)", tomorrowMorning),
+            ("Tomorrow evening (17:00)", tomorrowEvening),
+            ("Monday morning (9:00)", mondayMorning),
+        ]
+    }
+
+    @ViewBuilder
+    private var schedulePickerSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Schedule send")
+                .font(.system(size: 14, weight: .semibold))
+            DatePicker(
+                "Send at",
+                selection: $draftScheduledAt,
+                in: Date()...,
+                displayedComponents: [.date, .hourAndMinute]
+            )
+            .datePickerStyle(.graphical)
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showSchedulePicker = false
+                }
+                Button("Schedule") {
+                    state.compose.scheduledAt = draftScheduledAt
+                    showSchedulePicker = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 360)
     }
 
     private var subtitle: String {
@@ -556,6 +727,7 @@ struct ComposeView: View {
     @ViewBuilder
     private var sendButton: some View {
         let sending = state.compose.isSending
+        let scheduled = state.compose.scheduledAt != nil
         Button {
             attemptSend()
         } label: {
@@ -563,9 +735,11 @@ struct ComposeView: View {
                 if sending {
                     ProgressView().controlSize(.small).tint(.white)
                 }
-                Text(sending ? "Sending…" : "Send")
+                Text(sending
+                    ? "Sending…"
+                    : (scheduled ? "Schedule" : "Send"))
                     .font(.system(size: 12, weight: .semibold))
-                Image(systemName: "paperplane.fill")
+                Image(systemName: scheduled ? "clock.fill" : "paperplane.fill")
                     .font(.system(size: 10, weight: .semibold))
                     .opacity(sending ? 0 : 1)
             }
@@ -583,6 +757,10 @@ struct ComposeView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help(state.compose.to.splitAddressTokens().isEmpty ? "Add a recipient before sending" : "Send (⌘↩)")
+        .help(
+            state.compose.to.splitAddressTokens().isEmpty
+                ? "Add a recipient before sending"
+                : (scheduled ? "Schedule this email (⌘↩)" : "Send (⌘↩)")
+        )
     }
 }

@@ -227,6 +227,10 @@ struct ReaderView: View {
             unsubscribeRibbon(msg)
             Divider().opacity(0.2)
         }
+        if let warning = lookalikeWarning(for: msg) {
+            lookalikeRibbon(message: warning)
+            Divider().opacity(0.2)
+        }
         fromRow(msg)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -236,6 +240,48 @@ struct ReaderView: View {
         if !attachments.isEmpty {
             attachmentsBar(messageID: msg.id, attachments: attachments)
         }
+    }
+
+    /// Conservative phishing heuristic: when the sender's display name
+    /// claims a major brand but the email domain doesn't reflect it,
+    /// surface a warning. False-positive cost is high (an unrecognised
+    /// real "Apple Support" would flag a real apple.com email if we got
+    /// the list wrong), so we only check a small allowlist of brands
+    /// and require the brand string to appear in `name` but NOT in the
+    /// domain part. Empty display name → never warn (no plausible
+    /// impersonation vector without a name to spoof).
+    private static let lookalikeBrands: [String] = [
+        "apple", "google", "microsoft", "amazon", "paypal", "stripe",
+        "facebook", "instagram", "linkedin", "github", "twitter",
+        "x.com", "anthropic", "openai", "resend", "venmo", "coinbase",
+        "binance", "bank of america", "chase", "wells fargo",
+    ]
+    private func lookalikeWarning(for msg: Message) -> String? {
+        let parts = msg.fromParts
+        guard let raw = parts.name?.lowercased(), !raw.isEmpty else { return nil }
+        guard let host = parts.email.split(separator: "@").last.map(String.init)?.lowercased(),
+              !host.isEmpty else { return nil }
+        for brand in Self.lookalikeBrands {
+            if raw.contains(brand) && !host.contains(brand) {
+                return "This message claims to be from \(parts.name ?? brand) but was sent from \(host). Verify before clicking links."
+            }
+        }
+        return nil
+    }
+
+    private func lookalikeRibbon(message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(.primary)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.10))
     }
 
     @ViewBuilder
@@ -260,6 +306,10 @@ struct ReaderView: View {
             if expanded {
                 if m.hasUnsubscribeLink {
                     unsubscribeRibbon(m)
+                    Divider().opacity(0.2)
+                }
+                if let warning = lookalikeWarning(for: m) {
+                    lookalikeRibbon(message: warning)
                     Divider().opacity(0.2)
                 }
                 fromRow(m)
@@ -474,6 +524,23 @@ struct ReaderView: View {
                             Capsule().fill(Color.primary.opacity(0.08))
                         )
                 }
+                // Quiet "first contact" pill — fires when no other message
+                // in the loaded inbox came from this sender. Cheaper than
+                // the brand-lookalike warning above and helps the user
+                // notice a new conversation thread (which is when phishing
+                // attempts tend to slip through). Skipped on sent mail and
+                // when there are no messages loaded (cold start).
+                if !isSent, isFirstContact(msg) {
+                    Text("first contact")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(Color.orange.opacity(0.14))
+                        )
+                        .help("This is the first message we've seen from \(parts.email).")
+                }
                 // In multi-account mode, which inbox actually received this
                 // message — otherwise indistinguishable from another account
                 // when the user reads via the unified All-Accounts view.
@@ -486,6 +553,25 @@ struct ReaderView: View {
                 }
             }
         }
+    }
+
+    /// True when no other message in the currently-loaded inbox came
+    /// from the same email address. Best-effort heuristic — bounded by
+    /// the loaded set (~100 messages by default), so a sender who hasn't
+    /// written in months may falsely register as "first contact" once
+    /// their old messages page out. Acceptable for v1; would need a CLI
+    /// "have I corresponded with X?" query for the strict version.
+    private func isFirstContact(_ msg: Message) -> Bool {
+        let other = msg.fromParts.email.lowercased()
+        guard !other.isEmpty else { return false }
+        // Need at least one other message to compare against — otherwise
+        // we'd flag every message on a freshly-launched cold cache.
+        guard state.inbox.messages.count > 1 else { return false }
+        for candidate in state.inbox.messages {
+            if candidate.id == msg.id { continue }
+            if candidate.fromParts.email.lowercased() == other { return false }
+        }
+        return true
     }
 
     /// "to me" / "cc me" — only emitted for received mail and only when the
