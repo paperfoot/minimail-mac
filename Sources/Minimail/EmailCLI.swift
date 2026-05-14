@@ -230,22 +230,28 @@ actor EmailCLI {
         to: [String],
         cc: [String],
         bcc: [String],
+        replyTo: [String] = [],
         subject: String,
         text: String?,
         html: String?,
         attachments: [URL] = [],
-        replyToMessageID: Int64? = nil
+        replyToMessageID: Int64? = nil,
+        scheduledAt: String? = nil
     ) async throws {
         var args = ["send", "--json"]
         if let from { args += ["--from", from] }
         for t in to { args += ["--to", t] }
         for c in cc { args += ["--cc", c] }
         for b in bcc { args += ["--bcc", b] }
+        // Each --reply-to flag becomes one Reply-To header address; Resend
+        // accepts a list, so repeating is the way to express it.
+        for r in replyTo { args += ["--reply-to", r] }
         args += ["--subject", subject]
         if let text { args += ["--text", text] }
         if let html { args += ["--html", html] }
         for url in attachments { args += ["--attach", url.path] }
         if let replyToMessageID { args += ["--reply-to-msg", String(replyToMessageID)] }
+        if let scheduledAt, !scheduledAt.isEmpty { args += ["--scheduled-at", scheduledAt] }
         _ = try await runRaw(args: args)
     }
 

@@ -221,6 +221,17 @@ final class ComposeState {
     var replyAll: Bool = false
     var isSending: Bool = false
     var error: String?
+    /// Optional Reply-To header override. When non-empty, the outgoing
+    /// email's RFC-5322 Reply-To carries these addresses, so recipient
+    /// clients route Reply somewhere other than the From account.
+    /// Same comma/semicolon/newline-separated format as `to` / `cc` /
+    /// `bcc` so it can flow through the same token field.
+    var replyTo: String = ""
+    /// Optional Resend `scheduled_at`. When set, the CLI passes this to
+    /// Resend which holds the email server-side until the wake moment.
+    /// Cleared on send. Not persisted to drafts in v1 — the user picks a
+    /// schedule at send time.
+    var scheduledAt: Date?
 
     /// The backing draft row we're editing — created lazily on first autosave,
     /// or populated when the user taps a row in the Drafts folder. On send
@@ -239,6 +250,8 @@ final class ComposeState {
         attachments = []
         fromOverride = nil
         replyToID = nil; forwardingID = nil; replyAll = false; error = nil
+        replyTo = ""
+        scheduledAt = nil
         editingDraftID = nil; lastAutosaveAt = nil
     }
 
@@ -279,11 +292,17 @@ struct PendingSend: Sendable {
     let to: [String]
     let cc: [String]
     let bcc: [String]
+    /// Optional Reply-To header overrides. Empty Vec = inherit From identity.
+    let replyTo: [String]
     let subject: String
     let text: String?
     let html: String?
     let attachments: [URL]
     let replyToMessageID: Int64?
+    /// RFC-3339 string for Resend's `scheduled_at` — nil = send immediately.
+    /// Stored as a string rather than a Date so the CLI flag passes
+    /// through unchanged and the same value can be displayed in toasts.
+    let scheduledAt: String?
     let originalDraftID: String?
     let queuedAt: Date
     let deadline: Date
@@ -347,6 +366,17 @@ final class AppState {
 
     /// Undo window (seconds). Matches Gmail's max.
     static let undoSendWindow: TimeInterval = 10
+
+    /// RFC-3339 / ISO-8601 formatter for Resend's `scheduled_at` field.
+    /// Resend documents both RFC-3339 timestamps and natural-language
+    /// values ("in 1 min"); we always emit RFC-3339 for deterministic
+    /// behavior. nonisolated(unsafe) so Sendable PendingSend snapshots
+    /// can be built off the main actor.
+    nonisolated(unsafe) static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 
     /// Keyboard-help sheet visibility — `?` anywhere opens it.
     var showKeyboardHelp: Bool = false
@@ -1444,11 +1474,12 @@ final class AppState {
         let to = splitAddresses(compose.to)
         let cc = splitAddresses(compose.cc)
         let bcc = splitAddresses(compose.bcc)
+        let replyTo = splitAddresses(compose.replyTo)
         guard !to.isEmpty else {
             compose.error = "Add at least one recipient"
             return false
         }
-        if let invalid = (to + cc + bcc).first(where: { !$0.looksLikeEmail }) {
+        if let invalid = (to + cc + bcc + replyTo).first(where: { !$0.looksLikeEmail }) {
             compose.error = "Fix invalid address: \(invalid)"
             return false
         }
@@ -1468,16 +1499,23 @@ final class AppState {
         //   1. compose.fromOverride (user picked it explicitly in the dropdown)
         //   2. composeFromAccount (currentAccount, or default, or first)
         let fromAccount = compose.fromOverride?.email ?? composeFromAccount?.email
+        // Scheduled sends bypass the local undo window — Resend queues them
+        // server-side and the user picked a wake time minutes-to-days out,
+        // so the local 5-second hold is meaningless. Single-shot send
+        // immediately to the CLI when scheduled_at is present.
+        let scheduledISO: String? = compose.scheduledAt.map(Self.isoFormatter.string(from:))
         let snapshot = PendingSend(
             from: fromAccount,
             to: to,
             cc: cc,
             bcc: bcc,
+            replyTo: replyTo,
             subject: compose.subject,
             text: plainText,
             html: html,
             attachments: compose.attachments,
             replyToMessageID: compose.replyToID,
+            scheduledAt: scheduledISO,
             originalDraftID: compose.editingDraftID,
             queuedAt: now,
             deadline: now.addingTimeInterval(Self.undoSendWindow)
@@ -1510,11 +1548,13 @@ final class AppState {
                 to: snap.to,
                 cc: snap.cc,
                 bcc: snap.bcc,
+                replyTo: snap.replyTo,
                 subject: snap.subject,
                 text: snap.text,
                 html: snap.html,
                 attachments: snap.attachments,
-                replyToMessageID: snap.replyToMessageID
+                replyToMessageID: snap.replyToMessageID,
+                scheduledAt: snap.scheduledAt
             )
             if let draftID = snap.originalDraftID {
                 try? await cli.deleteDraft(id: draftID)
@@ -1562,9 +1602,11 @@ final class AppState {
         // explicitly chose to retry).
         let requeued = PendingSend(
             from: snap.from, to: snap.to, cc: snap.cc, bcc: snap.bcc,
+            replyTo: snap.replyTo,
             subject: snap.subject, text: snap.text, html: snap.html,
             attachments: snap.attachments,
             replyToMessageID: snap.replyToMessageID,
+            scheduledAt: snap.scheduledAt,
             originalDraftID: snap.originalDraftID,
             queuedAt: Date(),
             deadline: Date()
