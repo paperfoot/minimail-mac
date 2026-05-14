@@ -133,6 +133,8 @@ struct EmailValidatorTests {
         #expect("a@b.com".looksLikeEmail)
         #expect("boris+tag@paperfoot.ai".looksLikeEmail)
         #expect("first.last@sub.domain.co.uk".looksLikeEmail)
+        #expect("Alice Example <alice@example.com>".looksLikeEmail)
+        #expect("\"Doe, Jane\" <jane@example.com>".looksLikeEmail)
     }
 
     @Test("invalid strings fail")
@@ -141,6 +143,141 @@ struct EmailValidatorTests {
         #expect(!"no-at-sign".looksLikeEmail)
         #expect(!"@missing-local.com".looksLikeEmail)
         #expect(!"space in@email.com".looksLikeEmail)
+        #expect(!"Alice <not-an-address>".looksLikeEmail)
+    }
+
+    @Test("address list preserves display names")
+    func addressListSplit() {
+        let raw = "\"Doe, Jane\" <jane@example.com>, bob@example.com; Alice Example <alice@example.com>"
+        #expect(raw.splitAddressTokens() == [
+            "\"Doe, Jane\" <jane@example.com>",
+            "bob@example.com",
+            "Alice Example <alice@example.com>",
+        ])
+    }
+}
+
+@MainActor
+@Suite("Reply compose")
+struct ReplyComposeTests {
+    @Test("reply uses Reply-To when present")
+    func replyUsesReplyTo() {
+        let state = makeState()
+        let msg = makeMessage(
+            direction: "received",
+            from: "Sender <sender@example.com>",
+            to: ["Me <me@example.com>", "Other <other@example.com>"],
+            cc: ["CC <cc@example.com>"],
+            replyTo: ["Replies <reply@example.com>"]
+        )
+
+        state.startCompose(replyTo: msg)
+
+        #expect(state.compose.fromOverride?.email == "me@example.com")
+        #expect(state.compose.to == "Replies <reply@example.com>")
+        #expect(state.compose.cc.isEmpty)
+        #expect(state.compose.replyToID == msg.id)
+    }
+
+    @Test("reply all excludes self and dedupes To")
+    func replyAllExcludesSelfAndDedupe() {
+        let state = makeState()
+        let msg = makeMessage(
+            direction: "received",
+            from: "Sender <sender@example.com>",
+            to: ["Me <me@example.com>", "Other <other@example.com>"],
+            cc: ["Other <other@example.com>", "CC <cc@example.com>"],
+            replyTo: ["Sender <sender@example.com>"]
+        )
+
+        state.startCompose(replyTo: msg, replyAll: true)
+
+        #expect(state.compose.to == "Sender <sender@example.com>")
+        #expect(state.compose.cc == "Other <other@example.com>, CC <cc@example.com>")
+    }
+
+    @Test("replying to sent mail targets original recipients")
+    func sentReplyTargetsOriginalRecipients() {
+        let state = makeState()
+        let msg = makeMessage(
+            direction: "sent",
+            from: "Me <me@example.com>",
+            to: ["Alice <alice@example.com>"],
+            cc: ["Team <team@example.com>"],
+            replyTo: []
+        )
+
+        state.startCompose(replyTo: msg)
+
+        #expect(state.compose.to == "Alice <alice@example.com>")
+        #expect(state.compose.cc.isEmpty)
+    }
+
+    @Test("reply all to sent mail keeps original CC")
+    func sentReplyAllKeepsOriginalCC() {
+        let state = makeState()
+        let msg = makeMessage(
+            direction: "sent",
+            from: "Me <me@example.com>",
+            to: ["Alice <alice@example.com>"],
+            cc: ["Team <team@example.com>", "Me <me@example.com>"],
+            replyTo: []
+        )
+
+        state.startCompose(replyTo: msg, replyAll: true)
+
+        #expect(state.compose.to == "Alice <alice@example.com>")
+        #expect(state.compose.cc == "Team <team@example.com>")
+    }
+
+    private func makeState() -> AppState {
+        let state = AppState()
+        state.session.accounts = [
+            Account(
+                email: "me@example.com",
+                profile_name: "local",
+                display_name: nil,
+                is_default: true,
+                signature: ""
+            ),
+        ]
+        return state
+    }
+
+    private func makeMessage(
+        direction: String,
+        from: String,
+        to: [String],
+        cc: [String],
+        replyTo: [String]
+    ) -> Message {
+        Message(
+            id: 10,
+            remote_id: "remote-10",
+            direction: direction,
+            account_email: "me@example.com",
+            from_addr: from,
+            to: to,
+            cc: cc,
+            bcc: [],
+            reply_to: replyTo,
+            subject: "Hello",
+            text_body: "Original body",
+            html_body: nil,
+            rfc_message_id: "<original@example.com>",
+            in_reply_to: nil,
+            references: [],
+            last_event: direction == "sent" ? "sent" : "received",
+            is_read: true,
+            created_at: "2026-04-17T20:00:59Z",
+            synced_at: nil,
+            archived: false,
+            text_preview: nil,
+            starred: false,
+            snoozed_until: nil,
+            list_unsubscribe: nil,
+            has_attachments: false
+        )
     }
 }
 

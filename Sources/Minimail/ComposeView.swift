@@ -105,7 +105,7 @@ struct ComposeView: View {
                 primaryButton: .default(Text("Send Anyway")) {
                     Task { _ = await state.send() }
                 },
-                secondaryButton: .cancel()
+                secondaryButton: .cancel(Text("Keep Editing"))
             )
         }
     }
@@ -120,8 +120,15 @@ struct ComposeView: View {
                 message: "Recipients often filter out messages without a subject. You can go back and add one."
             )
         }
+        let body = state.compose.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.isEmpty {
+            return SendWarning(
+                title: "Send without a message?",
+                message: "The message body is empty. Send anyway?"
+            )
+        }
         if state.compose.attachments.isEmpty {
-            let body = state.compose.body.lowercased()
+            let body = attachmentHeuristicText(from: state.compose.body).lowercased()
             let tokens = ["attached", "attaching", "attachment", "enclosed", "see attached"]
             if tokens.contains(where: body.contains) {
                 return SendWarning(
@@ -131,6 +138,21 @@ struct ComposeView: View {
             }
         }
         return nil
+    }
+
+    /// Attachment checks should look at what the user wrote, not quoted reply
+    /// history. Quoted lines often contain "attached" from the original
+    /// sender and otherwise produce noisy false alarms.
+    private func attachmentHeuristicText(from body: String) -> String {
+        var lines: [String] = []
+        for line in body.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix(">") { continue }
+            if trimmed.hasPrefix("On "), trimmed.hasSuffix("wrote:") { continue }
+            if trimmed == "-------- Forwarded message --------" { break }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Shared send entrypoint — validations, then hands to AppState.
@@ -501,7 +523,7 @@ struct ComposeView: View {
 
             sendButton
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(state.compose.isSending || state.compose.to.isEmpty)
+                .disabled(state.compose.isSending || state.compose.to.splitAddressTokens().isEmpty)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -509,9 +531,26 @@ struct ComposeView: View {
     }
 
     private var subtitle: String {
-        if state.compose.replyToID != nil { return "Threaded reply · plain text" }
-        if state.compose.forwardingID != nil { return "Forward · plain text" }
-        return "Plain text"
+        var parts: [String] = []
+        if state.compose.replyToID != nil {
+            parts.append("Threaded reply")
+        } else if state.compose.forwardingID != nil {
+            parts.append("Forward")
+        } else {
+            parts.append("New message")
+        }
+        parts.append(state.compose.usesRichText ? "Rich text" : "Plain text")
+        let recipientCount = state.compose.to.splitAddressTokens().count
+            + state.compose.cc.splitAddressTokens().count
+            + state.compose.bcc.splitAddressTokens().count
+        if recipientCount > 0 {
+            parts.append("\(recipientCount) recipient\(recipientCount == 1 ? "" : "s")")
+        }
+        if !state.compose.attachments.isEmpty {
+            let count = state.compose.attachments.count
+            parts.append("\(count) file\(count == 1 ? "" : "s")")
+        }
+        return parts.joined(separator: " · ")
     }
 
     @ViewBuilder
@@ -544,6 +583,6 @@ struct ComposeView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help("Send (⌘↩)")
+        .help(state.compose.to.splitAddressTokens().isEmpty ? "Add a recipient before sending" : "Send (⌘↩)")
     }
 }

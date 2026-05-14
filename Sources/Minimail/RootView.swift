@@ -47,6 +47,11 @@ struct RootView: View {
                     .padding(.bottom, 12)
                     .padding(.horizontal, 16)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if state.deliveringSend != nil {
+                SendingNowToast()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             } else if state.lastFailedSend != nil {
                 // Send failed after the undo window — the message is in the
                 // Rust outbox table under status='failed', not lost. Offer
@@ -71,6 +76,8 @@ struct RootView: View {
                    value: state.router.currentView)
         .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.9),
                    value: state.pendingSend == nil)
+        .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.9),
+                   value: state.deliveringSend == nil)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2),
                    value: state.transientStatus)
         // ⌘/ shows the keyboard help sheet. We require ⌘ because a bare `?`
@@ -274,16 +281,52 @@ struct UndoSendToast: View {
                 Button {
                     Task { await state.flushPendingSendNow() }
                 } label: {
-                    Text("Send now")
-                        .font(.system(size: 11))
+                    Text("Send Now")
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 3)
+                        .background(Color.primary.opacity(0.07), in: Capsule())
                 }
                 .buttonStyle(.plain)
+                .help("Skip the undo delay and send immediately")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .glassToastBackground()
         }
+    }
+}
+
+/// Progress-only toast shown after the undo window closes and the CLI send is
+/// actually running. There is intentionally no Undo button in this state.
+struct SendingNowToast: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        if let send = state.deliveringSend {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Sending now")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(recipientSummary(send))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .glassToastBackground()
+        }
+    }
+
+    private func recipientSummary(_ send: PendingSend) -> String {
+        guard let first = send.to.first else { return "" }
+        if send.to.count == 1 { return first.emailAddressPart }
+        return "\(first.emailAddressPart) +\(send.to.count - 1)"
     }
 }
 
