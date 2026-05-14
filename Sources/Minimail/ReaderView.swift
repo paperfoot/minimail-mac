@@ -379,6 +379,8 @@ struct ReaderView: View {
 
     private func fromRow(_ msg: Message) -> some View {
         let parts = msg.fromParts
+        let toList = msg.to ?? []
+        let ccList = msg.cc ?? []
         return HStack(alignment: .top, spacing: 10) {
             AccountAvatar(email: parts.email)
                 .scaleEffect(1.4)
@@ -394,10 +396,23 @@ struct ReaderView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Text("to " + (msg.to ?? []).joined(separator: ", "))
+                Text("to " + toList.joined(separator: ", "))
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
+                    .help(toList.joined(separator: ", "))
+                // CC must be visible — without it the user can't tell that
+                // a "Reply" (vs "Reply All") will drop everyone else off
+                // the thread. The bug that motivated this row: a single-
+                // recipient reply silently ghosted the other party who'd
+                // been CC'd on the original message.
+                if !ccList.isEmpty {
+                    Text("cc " + ccList.joined(separator: ", "))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .help(ccList.joined(separator: ", "))
+                }
             }
             Spacer()
             Text(DateFormat.readerHeader(msg.created_at))
@@ -439,11 +454,36 @@ struct ReaderView: View {
         let positionLabel = state.reader.positionLabel
         return HStack(spacing: 8) {
             if let msg = state.reader.loaded {
-                Button { state.startCompose(replyTo: msg) } label: {
-                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+                // When the original has CC'd recipients, Reply All is almost
+                // always the intended action — a plain Reply silently drops
+                // everyone else off the thread. Make Reply All the prominent
+                // default in that case and keep Reply available alongside.
+                let hasCc = !(msg.cc ?? []).isEmpty
+                let multipleTo = (msg.to ?? []).count > 1
+                let showReplyAll = hasCc || multipleTo
+
+                if showReplyAll {
+                    Button { state.startCompose(replyTo: msg, replyAll: true) } label: {
+                        Label("Reply All", systemImage: "arrowshape.turn.up.left.2")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("Reply to sender and all other recipients (⌘⇧R)")
+
+                    Button { state.startCompose(replyTo: msg) } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Reply to sender only (⌘R)")
+                } else {
+                    Button { state.startCompose(replyTo: msg) } label: {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("Reply (⌘R)")
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
             Spacer()
             if let label = positionLabel {
