@@ -36,10 +36,10 @@ struct ComposeView: View {
                 .onChange(of: state.compose.to) { _, _ in state.scheduleAutosave() }
             if showCcBcc || !state.compose.cc.isEmpty || !state.compose.bcc.isEmpty {
                 Divider().opacity(0.1)
-                tokenRow(label: "Cc", binding: $bound.cc)
+                tokenRow(label: "Cc", binding: $bound.cc, field: .cc)
                     .onChange(of: state.compose.cc) { _, _ in state.scheduleAutosave() }
                 Divider().opacity(0.1)
-                tokenRow(label: "Bcc", binding: $bound.bcc)
+                tokenRow(label: "Bcc", binding: $bound.bcc, field: .bcc)
                     .onChange(of: state.compose.bcc) { _, _ in state.scheduleAutosave() }
             }
             Divider().opacity(0.1)
@@ -348,15 +348,21 @@ struct ComposeView: View {
         .padding(.vertical, 8)
     }
 
-    private func tokenRow(label: String, binding: Binding<String>) -> some View {
+    private func tokenRow(label: String, binding: Binding<String>, field: Field) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(label)
                 .font(.system(size: 12))
                 .foregroundStyle(.tertiary)
                 .frame(width: 52, alignment: .leading)
                 .padding(.top, 4)
-            EmailTokenField(text: binding, placeholder: "", suggestions: state.contactIndex)
-                .frame(minHeight: 24)
+            EmailTokenField(
+                text: binding,
+                placeholder: "",
+                suggestions: state.contactIndex,
+                focus: $focus,
+                focusValue: field
+            )
+            .frame(minHeight: 24)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
@@ -374,11 +380,24 @@ struct ComposeView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 52, alignment: .leading)
                 .padding(.top, 4)
-            EmailTokenField(text: $bound.to, placeholder: "", suggestions: state.contactIndex)
-                .frame(minHeight: 24)
+            EmailTokenField(
+                text: $bound.to,
+                placeholder: "",
+                suggestions: state.contactIndex,
+                focus: $focus,
+                focusValue: .to
+            )
+            .frame(minHeight: 24)
             if !showCcBcc && state.compose.cc.isEmpty && state.compose.bcc.isEmpty {
                 Button {
                     withAnimation(.easeOut(duration: 0.15)) { showCcBcc = true }
+                    // Hand focus to the newly-revealed Cc field. Wait one
+                    // runloop turn so the row exists before we focus it —
+                    // otherwise the @FocusState assignment lands on a view
+                    // that hasn't been laid out yet and silently no-ops.
+                    DispatchQueue.main.async {
+                        focus = .cc
+                    }
                 } label: {
                     Text("Cc / Bcc")
                         .font(.system(size: 10, weight: .semibold))
