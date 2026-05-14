@@ -143,7 +143,6 @@ final class ReaderState {
     /// need to call `inbox.visible()` (filter+sort over 100+ messages) on
     /// every re-render of the reader.
     var positionLabel: String?
-
     func attachments(for messageID: Int64) -> [Attachment] {
         attachmentsByMessageID[messageID] ?? []
     }
@@ -209,6 +208,7 @@ final class ComposeState {
         }
         return found
     }
+    var usesRichText: Bool { bodyContainsFormatting }
     var attachments: [URL] = []
     /// Per-compose "Send from" override. nil = use `AppState.composeFromAccount`
     /// (which falls back to default account or first account). Set when the
@@ -326,6 +326,10 @@ final class AppState {
     /// to render the countdown toast; nil = no pending send.
     var pendingSend: PendingSend?
     private var pendingSendTask: Task<Void, Never>?
+    /// Non-nil after the undo window has closed and the CLI send is actively
+    /// running. At this point Undo is no longer truthful, so the UI switches
+    /// from the undo toast to a progress-only sending toast.
+    var deliveringSend: PendingSend?
     /// Brief "Sent" flash after a queued send completes successfully.
     var transientStatus: TransientStatus?
     private var transientClearTask: Task<Void, Never>?
@@ -1238,29 +1242,16 @@ final class AppState {
             // nil and the default-account fallback would send from the
             // wrong identity. Single-account mode is unaffected.
             compose.fromOverride = session.accounts.first(where: { $0.email == msg.account_email })
-            compose.to = msg.from_addr
+            let recipients = Self.replyRecipients(
+                for: msg,
+                selfEmail: compose.fromOverride?.email ?? msg.account_email,
+                replyAll: replyAll
+            )
+            compose.to = recipients.to.joined(separator: ", ")
             let sub = msg.subject ?? ""
             compose.subject = sub.lowercased().hasPrefix("re:") ? sub : "Re: \(sub)"
-            // Reply All: pull every original recipient (to + cc) into Cc,
-            // minus the user's own address (would self-reply) and minus the
-            // person we're already replying to in `to`.
             if replyAll {
-                let me = (compose.fromOverride?.email ?? msg.account_email).lowercased()
-                let primary = msg.fromParts.email.lowercased()
-                let pool = (msg.to ?? []) + (msg.cc ?? [])
-                let cc = pool
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { addr in
-                        let lower = addr.lowercased()
-                        if lower.isEmpty { return false }
-                        if lower == me { return false }
-                        // Compare by parsed email part too — handles "Name <a@x.com>".
-                        let parsed = Self.emailPart(of: addr).lowercased()
-                        return parsed != me && parsed != primary
-                    }
-                if !cc.isEmpty {
-                    compose.cc = cc.joined(separator: ", ")
-                }
+                compose.cc = recipients.cc.joined(separator: ", ")
             }
             // Prepend an attribution + quoted body so the reply has context.
             // Apple Mail format: "On <date> at <time>, <Name> wrote:" then
@@ -1322,12 +1313,49 @@ final class AppState {
 
     /// Email-part of "Display Name <addr@host>"; falls back to the raw value.
     private static func emailPart(of raw: String) -> String {
-        if let open = raw.firstIndex(of: "<"),
-           let close = raw.firstIndex(of: ">"),
-           open < close {
-            return String(raw[raw.index(after: open)..<close])
+        raw.emailAddressPart
+    }
+
+    /// Mirrors email-cli's reply recipient rules so the compose preview and
+    /// eventual `send --reply-to-msg` payload agree. Received mail replies to
+    /// Reply-To when present; sent mail replies to the original recipients.
+    /// Reply All adds original To/Cc minus self and anyone already in To.
+    private static func replyRecipients(
+        for message: Message,
+        selfEmail: String,
+        replyAll: Bool
+    ) -> (to: [String], cc: [String]) {
+        let selfAddress = emailPart(of: selfEmail).lowercased()
+        let toRaw: [String]
+        if message.direction == "sent" {
+            toRaw = message.to ?? []
+        } else if let replyTo = message.reply_to, !replyTo.isEmpty {
+            toRaw = replyTo
+        } else {
+            toRaw = [message.from_addr]
         }
-        return raw
+
+        let to = stableAddressDedup(toRaw, excluding: [selfAddress])
+        guard replyAll else { return (to, []) }
+
+        let seenTo = Set(to.map { emailPart(of: $0).lowercased() })
+        let cc = stableAddressDedup(
+            (message.to ?? []) + (message.cc ?? []),
+            excluding: Set([selfAddress]).union(seenTo)
+        )
+        return (to, cc)
+    }
+
+    private static func stableAddressDedup(_ raw: [String], excluding excluded: Set<String>) -> [String] {
+        var seen = excluded
+        var out: [String] = []
+        for value in raw {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = emailPart(of: trimmed).lowercased()
+            guard !trimmed.isEmpty, !key.isEmpty, seen.insert(key).inserted else { continue }
+            out.append(trimmed)
+        }
+        return out
     }
 
     /// Apple-Mail-style attribution + quoted original body. Quote uses the
@@ -1420,6 +1448,10 @@ final class AppState {
             compose.error = "Add at least one recipient"
             return false
         }
+        if let invalid = (to + cc + bcc).first(where: { !$0.looksLikeEmail }) {
+            compose.error = "Fix invalid address: \(invalid)"
+            return false
+        }
         // If a previous queued send is still pending, fire it immediately so
         // its payload doesn't sit behind the new one.
         if pendingSend != nil {
@@ -1427,8 +1459,11 @@ final class AppState {
         }
 
         let now = Date()
-        let plainText = compose.body.isEmpty ? nil : compose.body
         let html = compose.bodyHTML
+        // email-cli requires an explicit text/html body argument. Passing an
+        // empty string is intentional for subject-only emails the user has
+        // acknowledged in the composer warning.
+        let plainText = html == nil ? compose.body : (compose.body.isEmpty ? nil : compose.body)
         // Resolve send identity in priority order:
         //   1. compose.fromOverride (user picked it explicitly in the dropdown)
         //   2. composeFromAccount (currentAccount, or default, or first)
@@ -1465,6 +1500,10 @@ final class AppState {
     /// if `pendingSend` was already cleared (idempotent).
     private func firePendingSend() async {
         guard let snap = pendingSend else { return }
+        pendingSendTask?.cancel()
+        pendingSendTask = nil
+        pendingSend = nil
+        deliveringSend = snap
         do {
             try await cli.send(
                 from: snap.from,
@@ -1480,8 +1519,7 @@ final class AppState {
             if let draftID = snap.originalDraftID {
                 try? await cli.deleteDraft(id: draftID)
             }
-            pendingSend = nil
-            pendingSendTask = nil
+            deliveringSend = nil
             // Successful send clears any stale failure affordance from a
             // previous attempt — the banner was about that attempt, not this
             // one.
@@ -1496,8 +1534,7 @@ final class AppState {
             // implementation nilled `pendingSend` and flashed an error that
             // disappeared — the message felt "lost" even though email-cli
             // had persisted it in the outbox table. (ritalin O-022)
-            pendingSendTask = nil
-            pendingSend = nil
+            deliveringSend = nil
             lastFailedSend = snap
             // Snapshot the outbox so the banner can show the matching failed
             // row (status + attempts + last_error). Best-effort: a failure to
@@ -1702,17 +1739,59 @@ final class AppState {
 }
 
 extension String {
+    var emailAddressPart: String {
+        let trimmed = self.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let open = trimmed.lastIndex(of: "<"),
+           let close = trimmed[trimmed.index(after: open)...].firstIndex(of: ">"),
+           open < close {
+            return String(trimmed[trimmed.index(after: open)..<close])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    }
+
     var looksLikeEmail: Bool {
         let pattern = #"^[A-Z0-9a-z._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"#
-        return self.range(of: pattern, options: .regularExpression) != nil
+        return emailAddressPart.range(of: pattern, options: .regularExpression) != nil
     }
 
     /// Split a raw address list into individual tokens. Splits on commas /
     /// semicolons / newlines / tabs — NOT whitespace, so display names like
     /// "Alice Example <alice@x.com>" survive intact. Trims each result.
     func splitAddressTokens() -> [String] {
-        self.split(whereSeparator: { ",;\n\t".contains($0) })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        var tokens: [String] = []
+        var current = ""
+        var inQuotes = false
+        var angleDepth = 0
+
+        func commit() {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { tokens.append(trimmed) }
+            current.removeAll(keepingCapacity: true)
+        }
+
+        for ch in self {
+            switch ch {
+            case "\"":
+                inQuotes.toggle()
+                current.append(ch)
+            case "<":
+                if !inQuotes { angleDepth += 1 }
+                current.append(ch)
+            case ">":
+                if !inQuotes, angleDepth > 0 { angleDepth -= 1 }
+                current.append(ch)
+            case ",", ";", "\n", "\t":
+                if inQuotes || angleDepth > 0 {
+                    current.append(ch)
+                } else {
+                    commit()
+                }
+            default:
+                current.append(ch)
+            }
+        }
+        commit()
+        return tokens
     }
 }
