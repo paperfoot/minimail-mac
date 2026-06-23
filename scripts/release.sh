@@ -7,8 +7,10 @@
 # Usage: ./scripts/release.sh 0.1.9
 #
 # Required environment:
-#   SIGNING_IDENTITY   e.g. "Developer ID Application: Paperfoot AI (SG) Pte. Ltd. (TEAMID)"
-#   APPLE_TEAM_ID      Apple Developer Team ID that owns the signing identity
+#   SIGNING_IDENTITY   e.g. "Developer ID Application: SUPER SIMPLE LEARNING LTD (S25N6MXJCF)"
+#   APPLE_TEAM_ID      Apple Developer Team ID that owns the signing identity (e.g. S25N6MXJCF)
+#   (The bundle id prefix `ai.paperfoot` is the product namespace and is
+#    intentionally independent of the signing team.)
 #   NOTARY_PROFILE     keychain profile name for notarytool (default: "minimail-notary")
 #
 # One-time setup (before first release):
@@ -47,8 +49,8 @@ DMG_NAME="Minimail-${VERSION}.dmg"
 DMG_PATH=".build/${DMG_NAME}"
 GH_REPO="paperfoot/minimail-mac"
 
-: "${APPLE_TEAM_ID:?Set APPLE_TEAM_ID to the Apple Developer Team ID for Paperfoot AI (SG) Pte. Ltd.}"
-: "${SIGNING_IDENTITY:?Set SIGNING_IDENTITY to the Developer ID Application certificate for Paperfoot AI (SG) Pte. Ltd.}"
+: "${APPLE_TEAM_ID:?Set APPLE_TEAM_ID to the Apple Developer Team ID for SUPER SIMPLE LEARNING LTD (S25N6MXJCF)}"
+: "${SIGNING_IDENTITY:?Set SIGNING_IDENTITY to the Developer ID Application certificate for SUPER SIMPLE LEARNING LTD (S25N6MXJCF)}"
 TEAM_ID="${APPLE_TEAM_ID}"
 : "${NOTARY_PROFILE:=minimail-notary}"
 : "${NOTARIZE:=1}"
