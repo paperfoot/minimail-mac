@@ -172,6 +172,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the previous one-shot `didFlushOnShutdown` guard actively HURT us:
         // only the first close in the app's lifetime flushed; every close
         // thereafter was a silent data-loss window.
+        // Closing the popover counts as dismissing the one-time launch-at-login
+        // nudge (it has no other dismiss affordance), so it isn't re-shown on
+        // the next open or launch.
+        appState.dismissLaunchAtLoginOfferIfShown()
+
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.appState.flushAutosave()
