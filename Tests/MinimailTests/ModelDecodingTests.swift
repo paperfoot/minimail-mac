@@ -308,3 +308,24 @@ struct DateFormatTests {
         #expect(DateFormat.parse("hello") == nil)
     }
 }
+
+@Suite("External link scheme allowlist")
+struct ExternalLinkTests {
+    @Test("web and mail schemes are allowed")
+    func allowed() {
+        #expect(ExternalLink.isAllowed(URL(string: "https://example.com")!))
+        #expect(ExternalLink.isAllowed(URL(string: "http://example.com")!))
+        #expect(ExternalLink.isAllowed(URL(string: "mailto:a@b.com")!))
+        // Scheme comparison is case-insensitive.
+        #expect(ExternalLink.isAllowed(URL(string: "HTTPS://example.com")!))
+    }
+
+    @Test("dangerous and custom schemes are blocked")
+    func blocked() {
+        #expect(!ExternalLink.isAllowed(URL(string: "file:///etc/passwd")!))
+        #expect(!ExternalLink.isAllowed(URL(string: "smb://host/share")!))
+        #expect(!ExternalLink.isAllowed(URL(string: "ftp://host/x")!))
+        #expect(!ExternalLink.isAllowed(URL(string: "x-apple.systempreferences:com.apple.x")!))
+        #expect(!ExternalLink.isAllowed(URL(string: "javascript:alert(1)")!))
+    }
+}

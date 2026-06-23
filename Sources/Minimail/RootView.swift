@@ -42,7 +42,12 @@ struct RootView: View {
                 }
             }
 
-            if state.pendingSend != nil {
+            if state.pendingLaunchAtLoginOffer {
+                LaunchAtLoginOfferCard()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if state.pendingSend != nil {
                 UndoSendToast()
                     .padding(.bottom, 12)
                     .padding(.horizontal, 16)
@@ -76,6 +81,8 @@ struct RootView: View {
                    value: state.router.currentView)
         .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.9),
                    value: state.pendingSend == nil)
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85),
+                   value: state.pendingLaunchAtLoginOffer)
         .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.9),
                    value: state.deliveringSend == nil)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2),
@@ -428,6 +435,47 @@ struct OutboxRecoveryBanner: View {
             .buttonStyle(.plain)
             .help("Dismiss — the message stays in the outbox for later retry")
             .accessibilityLabel("Dismiss failed-send banner")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassToastBackground()
+    }
+}
+
+/// One-time nudge offering launch-at-login the first time an account exists.
+/// A menu-bar mail client only checks for new mail while it's running, so this
+/// is what makes Minimail keep working after a reboot. We ask once and never
+/// auto-register without consent — the user owns their Login Items list.
+struct LaunchAtLoginOfferCard: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "power")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Open Minimail at login?")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text("So new mail keeps arriving in the background.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 6)
+            Button("Not Now") { state.respondToLaunchAtLoginOffer(enable: false) }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Button("Enable") { state.respondToLaunchAtLoginOffer(enable: true) }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background(Color.accentColor.opacity(0.15), in: Capsule())
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

@@ -26,6 +26,7 @@ struct SettingsView: View {
     @State private var signatureSaved: Date?
     @State private var signatureEditorHandle = RichTextEditorHandle()
     @State private var launchAtLoginEnabled: Bool = false
+    @State private var launchAtLoginNeedsApproval: Bool = false
     @State private var launchAtLoginError: String?
     @State private var apiKeyProfile: String?
     @State private var apiKeyDraft: String = ""
@@ -471,6 +472,22 @@ struct SettingsView: View {
             .toggleStyle(.switch)
             .controlSize(.small)
 
+            // Registered-but-unapproved is its own state: the toggle reads ON
+            // (the item *is* in the user's Login Items list) but macOS won't
+            // launch it until the user approves it. Tell them, and give a
+            // one-click path to the right System Settings pane.
+            if launchAtLoginNeedsApproval {
+                HStack(spacing: 6) {
+                    Text("Needs approval in System Settings to launch at login.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Open Login Items") { LaunchAtLogin.openSystemSettings() }
+                        .font(.system(size: 10))
+                        .buttonStyle(.link)
+                }
+            }
+
             if let launchAtLoginError {
                 Text(launchAtLoginError)
                     .font(.system(size: 10))
@@ -481,20 +498,24 @@ struct SettingsView: View {
     }
 
     private func loadLaunchAtLoginState() {
-        launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+        let state = LaunchAtLogin.state
+        launchAtLoginEnabled = state != .disabled
+        launchAtLoginNeedsApproval = state == .requiresApproval
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {
         do {
-            if enabled {
-                try SMAppService.mainApp.register()
-            } else {
-                try SMAppService.mainApp.unregister()
-            }
-            launchAtLoginEnabled = enabled
+            let state = try LaunchAtLogin.set(enabled)
+            // Reflect the *real* resulting state rather than the requested one:
+            // register() can land in .requiresApproval, in which case the
+            // toggle stays ON but we must show the approval hint.
+            launchAtLoginEnabled = state != .disabled
+            launchAtLoginNeedsApproval = state == .requiresApproval
             launchAtLoginError = nil
         } catch {
-            launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+            let state = LaunchAtLogin.state
+            launchAtLoginEnabled = state != .disabled
+            launchAtLoginNeedsApproval = state == .requiresApproval
             launchAtLoginError = ActionableError.classify(error).message
         }
     }
