@@ -135,6 +135,18 @@ builds and groups correctly in Console.app.
   are 64KB and the CLI can emit large JSON payloads (full message
   bodies, HTML). Deadlocks are silent and only reproduce intermittently.
 
+## Launch-at-login vs the email-cli daemon
+
+The shipped GUI registers itself as a login item via `SMAppService.mainApp`
+(see `LaunchAtLogin.swift`) — this is the **only** auto-start mechanism the
+app uses, and the first-run offer card nudges the user to enable it.
+
+`email-cli` *also* ships a separate menu-bar `daemon` + `autostart` LaunchAgent
+(`ai.paperfoot.email-cli.daemon`). That is a headless-only alternative; the GUI
+never invokes it. **Don't run both at once** — you'd get two menu-bar items and
+two pollers fighting over the same DB + notifications. Never wire the GUI to
+install the Rust LaunchAgent.
+
 ## Build + release
 
 - Build:       `swift build` (debug) or `./scripts/build-app.sh release`.
