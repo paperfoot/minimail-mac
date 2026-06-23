@@ -381,6 +381,15 @@ final class AppState {
     /// Keyboard-help sheet visibility — `?` anywhere opens it.
     var showKeyboardHelp: Bool = false
 
+    /// True while the one-time "Open Minimail at login?" nudge is showing.
+    /// A menu-bar mail client only checks for new mail while it's running, so
+    /// for most users launch-at-login is the difference between a working
+    /// background client and one that's dead after the next reboot — yet it
+    /// was previously opt-in, buried in Settings, and off by default (the
+    /// reported "doesn't start automatically" symptom). We offer it once.
+    var pendingLaunchAtLoginOffer: Bool = false
+    private static let didOfferLaunchAtLoginKey = "minimail.didOfferLaunchAtLogin"
+
     /// Cache of every address Minimail has seen in `from`, `to`, `cc`, `bcc`
     /// across stored messages. Rebuilt from `inbox.messages` on each refresh.
     /// Used by EmailTokenField for recipient autocomplete.
@@ -413,6 +422,73 @@ final class AppState {
         await refreshInbox(pull: false)
         // Prefetch drafts so the Drafts tab doesn't flash empty-state when tapped.
         await refreshDrafts()
+        // Reconcile any send the previous session left mid-flight (crash/quit
+        // during the undo window or delivery) before the user notices.
+        await reconcileOutboxOnLaunch()
+        // One-time launch-at-login nudge once at least one account exists.
+        offerLaunchAtLoginIfNeeded()
+    }
+
+    // ── Launch-at-login first-run offer ───────────────────────────────────
+
+    /// Decide whether to show the one-time launch-at-login nudge. Gated on a
+    /// UserDefaults flag so we ask exactly once; skipped if it's already
+    /// enabled. We never auto-register without consent — the user owns their
+    /// Login Items list — so this only flips a flag the UI turns into a card.
+    func offerLaunchAtLoginIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.didOfferLaunchAtLoginKey) else { return }
+        if LaunchAtLogin.isOn {
+            // Already registered — record it so we never ask later.
+            defaults.set(true, forKey: Self.didOfferLaunchAtLoginKey)
+            return
+        }
+        pendingLaunchAtLoginOffer = true
+    }
+
+    /// Handle the user's choice on the launch-at-login card. Records that we
+    /// asked (so the nudge never returns), and registers when they accept —
+    /// surfacing the approval path when macOS lands in `.requiresApproval`.
+    func respondToLaunchAtLoginOffer(enable: Bool) {
+        UserDefaults.standard.set(true, forKey: Self.didOfferLaunchAtLoginKey)
+        pendingLaunchAtLoginOffer = false
+        guard enable else { return }
+        do {
+            let state = try LaunchAtLogin.set(true)
+            if state == .requiresApproval {
+                flashStatus(.info("Approve Minimail in System Settings ▸ Login Items to finish."))
+                LaunchAtLogin.openSystemSettings()
+            } else {
+                flashStatus(.info("Minimail will open at login"))
+            }
+        } catch {
+            inbox.error = ActionableError.classify(error)
+        }
+    }
+
+    /// Drain any send the previous session left mid-flight. Once `firePendingSend`
+    /// invokes the CLI, the Rust side writes a `pending` outbox row *before* the
+    /// network call; a crash/SIGKILL between that write and the status flip
+    /// leaves the row stuck in `pending` with nothing re-driving it until the
+    /// user manually opened Settings ▸ Outbox. Flushing on launch delivers
+    /// those automatically — the flush is idempotent (each row carries a
+    /// per-message Idempotency-Key that Resend dedups), so a row that actually
+    /// did reach Resend before the crash won't double-send. Best-effort: a
+    /// flush hiccup must never block startup.
+    private func reconcileOutboxOnLaunch() async {
+        if let flushed = try? await cli.outboxFlush(), flushed.sent > 0 {
+            flashStatus(.info("Delivered \(flushed.sent) queued message\(flushed.sent == 1 ? "" : "s")"))
+        }
+        // Surface anything that genuinely failed so the user has a path back.
+        // The Settings ▸ Outbox panel retries from the stored payload losslessly
+        // (attachments included), so we point there rather than rebuilding a
+        // lossy in-memory snapshot.
+        if let entries = try? await cli.outboxList() {
+            let failed = entries.filter(\.isFailed).count
+            if failed > 0 {
+                flashStatus(.info("\(failed) message\(failed == 1 ? "" : "s") failed to send earlier — Settings ▸ Outbox to retry"))
+            }
+        }
     }
 
     // ── Reader navigation within the list ─────────────────────────────────
@@ -856,8 +932,12 @@ final class AppState {
     func unsubscribeFrom(_ message: Message) async -> String? {
         do {
             let urlString = try await cli.unsubscribeURL(messageID: message.id)
-            if let url = URL(string: urlString) {
-                NSWorkspace.shared.open(url)
+            // List-Unsubscribe is attacker-controlled mail content; gate the
+            // scheme so a crafted `file://` / custom-scheme header can't drive
+            // a one-click cross-app launch.
+            guard let url = URL(string: urlString), ExternalLink.open(url) else {
+                flashStatus(.info("Unsubscribe link blocked (unsupported link type)"))
+                return nil
             }
             flashStatus(.info("Unsubscribe link opened"))
             return urlString
@@ -1196,6 +1276,12 @@ final class AppState {
             }
             compose.lastAutosaveAt = Date()
         } catch {
+            // A cancelled CLI call (user kept typing → debounce superseded this
+            // run, or navigated away) is not a failure — swallow it silently
+            // rather than flashing a phantom "Draft autosave failed: exited
+            // with 15" toast.
+            if Task.isCancelled { return }
+            if case EmailCLI.CLIError.cancelled = error { return }
             // Route through ActionableError so the user sees a human-readable
             // error when the CLI itself fails (not just a silent retry on
             // next keystroke). Silent swallow was masking real bugs — e.g.
@@ -1217,9 +1303,18 @@ final class AppState {
     }
 
     /// Called on popover close / app quit — flush any pending debounce.
+    ///
+    /// If a debounced save is already mid-CLI-round-trip, its field snapshot was
+    /// taken *before* the await, so any keystrokes the user typed after that and
+    /// before closing would be lost if we just bailed on the reentrancy guard.
+    /// Wait out the in-flight save (everything here is main-actor isolated, so
+    /// `isAutosaving` flips false synchronously when it returns), then write one
+    /// final time capturing the latest fields. The yield loop is bounded to a
+    /// single sub-second CLI round-trip and only runs on close/quit.
     func flushAutosave() async {
         compose.autosaveTask?.cancel()
         compose.autosaveTask = nil
+        while compose.isAutosaving { await Task.yield() }
         await performAutosave()
     }
 
@@ -1323,8 +1418,23 @@ final class AppState {
                                     isDirectory: true)
         try? FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
         for attachment in list {
-            let filename = attachment.filename ?? "attachment-\(attachment.id)"
-            let dest = tempBase.appendingPathComponent(filename)
+            // The filename is server/sender-controlled. `appendingPathComponent`
+            // does NOT strip `..`, so a name like "../../../../Library/..."
+            // would let a malicious sender write attachment bytes to an
+            // arbitrary user-writable path the instant the user hits Forward.
+            // Reduce to a bare leaf, reject dotfiles/traversal, then assert the
+            // resolved path stays inside the temp dir.
+            let rawName = attachment.filename ?? ""
+            var leaf = (rawName as NSString).lastPathComponent
+            if leaf.isEmpty || leaf == "." || leaf == ".." || leaf.hasPrefix(".") {
+                leaf = "attachment-\(attachment.id)"
+            }
+            let dest = tempBase.appendingPathComponent(leaf)
+            guard dest.standardizedFileURL.path
+                .hasPrefix(tempBase.standardizedFileURL.path + "/") else {
+                Log.cli.error("rejected forward attachment with traversal filename")
+                continue
+            }
             do {
                 try await cli.downloadAttachment(messageID: messageID,
                                                  attachmentID: attachment.id,
@@ -1336,7 +1446,7 @@ final class AppState {
                 // download finished.
                 addAttachment(dest)
             } catch {
-                Log.cli.error("forward re-attach failed for \(filename, privacy: .public): \(String(describing: error), privacy: .public)")
+                Log.cli.error("forward re-attach failed for \(leaf, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
     }
@@ -1499,10 +1609,23 @@ final class AppState {
         //   1. compose.fromOverride (user picked it explicitly in the dropdown)
         //   2. composeFromAccount (currentAccount, or default, or first)
         let fromAccount = compose.fromOverride?.email ?? composeFromAccount?.email
-        // Scheduled sends bypass the local undo window — Resend queues them
-        // server-side and the user picked a wake time minutes-to-days out,
-        // so the local 5-second hold is meaningless. Single-shot send
-        // immediately to the CLI when scheduled_at is present.
+        // Drop attachments whose files have vanished since they were added
+        // (temp cleanup, ejected volume, move). The Rust side opens every
+        // path and hard-errors on the first miss, so an unfiltered list would
+        // abort the entire send — mirror the exact filter `performAutosave`
+        // already applies one method over so the two paths can't drift.
+        let existingAttachments = compose.attachments.filter {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
+        let droppedAttachments = compose.attachments.count - existingAttachments.count
+        if droppedAttachments > 0 {
+            flashStatus(.info("\(droppedAttachments) attachment file\(droppedAttachments == 1 ? "" : "s") no longer on disk — not sent"))
+        }
+        // Scheduled sends bypass the local undo window — Resend holds them
+        // server-side and the user picked a wake time minutes-to-days out, so
+        // the local 10-second hold is meaningless (and the countdown toast
+        // would falsely read "Sending in 10s"). Fire straight to the CLI when
+        // scheduled_at is present.
         let scheduledISO: String? = compose.scheduledAt.map(Self.isoFormatter.string(from:))
         let snapshot = PendingSend(
             from: fromAccount,
@@ -1513,7 +1636,7 @@ final class AppState {
             subject: compose.subject,
             text: plainText,
             html: html,
-            attachments: compose.attachments,
+            attachments: existingAttachments,
             replyToMessageID: compose.replyToID,
             scheduledAt: scheduledISO,
             originalDraftID: compose.editingDraftID,
@@ -1524,6 +1647,12 @@ final class AppState {
         compose.clear()
         router.currentView = .inbox
         pendingSend = snapshot
+
+        // Server-scheduled: skip the undo timer and hand off immediately.
+        if scheduledISO != nil {
+            await firePendingSend()
+            return true
+        }
 
         pendingSendTask?.cancel()
         pendingSendTask = Task { [weak self] in

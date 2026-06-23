@@ -350,7 +350,9 @@ private struct HTMLWebView: NSViewRepresentable {
                      decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
             if navigationAction.navigationType == .linkActivated,
                let url = navigationAction.request.url {
-                NSWorkspace.shared.open(url)
+                // The href is attacker-controlled email HTML. Only open web /
+                // mail schemes — never file://, custom schemes, etc.
+                ExternalLink.open(url)
                 decisionHandler(.cancel)
                 return
             }

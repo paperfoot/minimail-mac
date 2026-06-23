@@ -199,8 +199,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             done.signal()
         }
         // Budget: 4.5 seconds total (NSApp gives us 5; keep 0.5s safety).
+        // Pump the run loop FIRST, then poll the semaphore with a zero timeout,
+        // so the MainActor is serviced continuously. The old order blocked the
+        // main thread on a 50ms semaphore wait before each 20ms pump (~28% duty
+        // cycle), needlessly throttling the flush's main-actor continuations.
         let deadline = Date().addingTimeInterval(4.5)
-        while done.wait(timeout: .now() + 0.05) == .timedOut {
+        while done.wait(timeout: .now()) == .timedOut {
             if Date() > deadline { break }
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }

@@ -560,6 +560,11 @@ actor EmailCLI {
             }
             let stdoutData = await stdoutCollector.finish()
             let stderrData = await stderrCollector.finish()
+            // If the task was cancelled, onCancel SIGTERM'd the child and the
+            // exit code is just the signal (15). Surface the dedicated
+            // .cancelled case so callers can treat it as a no-op instead of
+            // flashing a phantom "email-cli exited with 15" failure.
+            if Task.isCancelled { throw CLIError.cancelled }
             let code = process.terminationStatus
             if code == 0 {
                 return stdoutData
