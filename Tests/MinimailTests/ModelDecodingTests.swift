@@ -329,3 +329,46 @@ struct ExternalLinkTests {
         #expect(!ExternalLink.isAllowed(URL(string: "javascript:alert(1)")!))
     }
 }
+
+@Suite("Launch-at-login offer")
+@MainActor
+struct LaunchAtLoginOfferTests {
+    // Mirror of AppState's private didOfferLaunchAtLoginKey.
+    private static let key = "minimail.didOfferLaunchAtLogin"
+
+    private func withCleanFlag(_ body: (AppState) -> Void) {
+        let saved = UserDefaults.standard.object(forKey: Self.key)
+        UserDefaults.standard.removeObject(forKey: Self.key)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: Self.key) }
+            else { UserDefaults.standard.removeObject(forKey: Self.key) }
+        }
+        body(AppState())
+    }
+
+    @Test("closing the popover while shown records the ask and stops re-showing")
+    func dismissRecordsAndStopsReshow() {
+        withCleanFlag { state in
+            state.offerLaunchAtLoginIfNeeded()
+            #expect(state.pendingLaunchAtLoginOffer == true)   // first run: offered
+
+            // User closes the popover without pressing a button.
+            state.dismissLaunchAtLoginOfferIfShown()
+            #expect(state.pendingLaunchAtLoginOffer == false)
+            #expect(UserDefaults.standard.bool(forKey: Self.key) == true)
+
+            // A later bootstrap (or popover reopen) must NOT re-offer.
+            state.offerLaunchAtLoginIfNeeded()
+            #expect(state.pendingLaunchAtLoginOffer == false)
+        }
+    }
+
+    @Test("dismiss is a no-op when the card was never shown")
+    func dismissNoopWhenNotShown() {
+        withCleanFlag { state in
+            state.dismissLaunchAtLoginOfferIfShown()
+            // Nothing was shown, so we should NOT have burned the one-time ask.
+            #expect(UserDefaults.standard.bool(forKey: Self.key) == false)
+        }
+    }
+}

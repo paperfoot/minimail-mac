@@ -466,6 +466,21 @@ final class AppState {
         }
     }
 
+    /// Called when the popover closes. The nudge card is dismissed simply by
+    /// closing the popover (status-item click / Esc / click-away) without
+    /// touching a button — so if it was on screen and unanswered, treat that
+    /// as "not now": record that we asked (so it never returns on relaunch)
+    /// and clear the in-memory flag (so reopening the popover this session
+    /// doesn't show it again). Without this, the card re-appeared on every
+    /// reopen and every launch until an explicit button press — the
+    /// "asked twice" the user hit. Showing happens only while the popover is
+    /// open, so this still guarantees the nudge is seen exactly once.
+    func dismissLaunchAtLoginOfferIfShown() {
+        guard pendingLaunchAtLoginOffer else { return }
+        UserDefaults.standard.set(true, forKey: Self.didOfferLaunchAtLoginKey)
+        pendingLaunchAtLoginOffer = false
+    }
+
     /// Drain any send the previous session left mid-flight. Once `firePendingSend`
     /// invokes the CLI, the Rust side writes a `pending` outbox row *before* the
     /// network call; a crash/SIGKILL between that write and the status flip
