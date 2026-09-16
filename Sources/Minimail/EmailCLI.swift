@@ -57,6 +57,8 @@ actor EmailCLI {
 
     private var binaryPath: String?
 
+    init(binaryPath: String? = nil) { self.binaryPath = binaryPath }
+
     /// Called once at startup. Resolves the binary path; nil means not installed.
     /// Priority: bundled inside the .app, then Homebrew, then Cargo, then PATH.
     func locate() async -> String? {
@@ -145,6 +147,22 @@ actor EmailCLI {
         try await runJSON(args: ["account", "list", "--json"], as: [Account].self)
     }
 
+    func listProfiles() async throws -> [MailProfile] {
+        try await runJSON(args: ["profile", "list", "--json"], as: [MailProfile].self)
+    }
+
+    func editAccount(email: String, name: String, profile: String) async throws {
+        _ = try await runRaw(args: ["account", "edit", email, "--name", name, "--profile", profile, "--json"])
+    }
+
+    func removeAccount(email: String) async throws {
+        _ = try await runRaw(args: ["account", "remove", email, "--yes", "--json"])
+    }
+
+    func removeProfile(name: String) async throws {
+        _ = try await runRaw(args: ["profile", "remove", name, "--yes", "--json"])
+    }
+
     /// Create a profile (Resend API key container) via the CLI.
     ///
     /// The API key is passed through the child process's environment, not
@@ -157,7 +175,7 @@ actor EmailCLI {
     /// restricts to the same user's processes.
     func addProfile(name: String, apiKey: String) async throws {
         let envName = "MINIMAIL_RESEND_API_KEY"
-        let args = ["profile", "add", name, "--api-key-env", envName, "--json"]
+        let args = ["profile", "add", name, "--api-key-env", envName, "--validate", "--json"]
         _ = try await runRaw(args: args, env: [envName: apiKey])
     }
 
@@ -179,13 +197,18 @@ actor EmailCLI {
         snoozed: Bool = false,
         limit: Int = 50
     ) async throws -> [Message] {
+        let page = try await listInboxPage(account: account, archived: archived, starred: starred, snoozed: snoozed, limit: limit)
+        return page.messages ?? []
+    }
+
+    func listInboxPage(account: String?, archived: Bool = false, starred: Bool = false, snoozed: Bool = false, limit: Int = 100, after: Int64? = nil) async throws -> InboxListResponse {
         var args = ["inbox", "list", "--json", "--limit", String(limit)]
         if let account { args += ["--account", account] }
         if archived { args += ["--archived"] }
         if starred { args += ["--starred"] }
         if snoozed { args += ["--snoozed"] }
-        let resp = try await runJSON(args: args, as: InboxListResponse.self)
-        return resp.messages ?? []
+        if let after { args += ["--after", String(after)] }
+        return try await runJSON(args: args, as: InboxListResponse.self)
     }
 
     func readMessage(id: Int64, markRead: Bool = false) async throws -> Message {
@@ -328,7 +351,7 @@ actor EmailCLI {
         return try await runJSON(args: args, as: [Draft].self)
     }
 
-    func createDraft(account: String?, to: [String], cc: [String], bcc: [String], subject: String, text: String?, html: String? = nil, attachments: [URL] = [], replyToMessageID: Int64? = nil) async throws -> Draft {
+    func createDraft(account: String?, to: [String], cc: [String], bcc: [String], subject: String, text: String?, html: String? = nil, attachments: [URL] = [], replyToMessageID: Int64? = nil, replyTo: [String] = [], scheduledAt: String? = nil) async throws -> Draft {
         var args = ["draft", "create", "--json"]
         if let account { args += ["--account", account] }
         for t in to { args += ["--to", t] }
@@ -339,6 +362,8 @@ actor EmailCLI {
         if let html { args += ["--html", html] }
         for url in attachments { args += ["--attach", url.path] }
         if let replyToMessageID { args += ["--reply-to-msg", String(replyToMessageID)] }
+        for address in replyTo { args += ["--reply-to", address] }
+        if let scheduledAt { args += ["--scheduled-at", scheduledAt] }
         return try await runJSON(args: args, as: Draft.self)
     }
 
@@ -355,6 +380,7 @@ actor EmailCLI {
     /// `account` is optional: pass it when the user changes the From dropdown
     /// on an existing draft. Omit to preserve the stored account_email. The
     /// Rust side (draft_edit in commands/draft.rs) wires this into the UPDATE.
+    @discardableResult
     func editDraft(
         id: String,
         account: String? = nil,
@@ -364,13 +390,21 @@ actor EmailCLI {
         subject: String?,
         text: String?,
         html: String? = nil,
-        attachments: [URL]? = nil
-    ) async throws {
+        attachments: [URL]? = nil,
+        replyTo: [String]? = nil,
+        scheduledAt: String? = nil,
+        clearSchedule: Bool = false,
+        clearHTML: Bool = false
+    ) async throws -> Draft {
         var args = ["draft", "edit", id, "--json"]
         if let account { args += ["--account", account] }
         if let subject { args += ["--subject", subject] }
         if let text { args += ["--text", text] }
         if let html { args += ["--html", html] }
+        if clearHTML { args += ["--clear-html"] }
+        if let replyTo { args += replyTo.isEmpty ? ["--reply-to", ""] : replyTo.flatMap { ["--reply-to", $0] } }
+        if let scheduledAt { args += ["--scheduled-at", scheduledAt] }
+        else if clearSchedule { args += ["--clear-schedule"] }
         if let to { args += to.isEmpty ? ["--to", ""] : to.flatMap { ["--to", $0] } }
         if let cc { args += cc.isEmpty ? ["--cc", ""] : cc.flatMap { ["--cc", $0] } }
         if let bcc { args += bcc.isEmpty ? ["--bcc", ""] : bcc.flatMap { ["--bcc", $0] } }
@@ -381,7 +415,7 @@ actor EmailCLI {
                 for url in attachments { args += ["--attach", url.path] }
             }
         }
-        _ = try await runRaw(args: args)
+        return try await runJSON(args: args, as: Draft.self)
     }
 
     func deleteDraft(id: String) async throws {

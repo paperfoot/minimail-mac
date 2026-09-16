@@ -24,7 +24,10 @@ enum ExternalLink {
             Log.cli.error("blocked external link with disallowed scheme: \(url.scheme ?? "nil", privacy: .public)")
             return false
         }
-        NSWorkspace.shared.open(url)
-        return true
+        if url.scheme?.lowercased() == "mailto" {
+            NotificationCenter.default.post(name: .minimailOpenMailto, object: url)
+            return true
+        }
+        return NSWorkspace.shared.open(url)
     }
 }

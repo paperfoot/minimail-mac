@@ -9,6 +9,7 @@ final class MinimailNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = MinimailNotifier()
     private var seenIDs: Set<Int64> = []
     private var granted = false
+    private let startedAt = Date()
     /// Set by AppDelegate so the notifier can route taps.
     weak var popoverOpener: AppDelegate?
 
@@ -23,12 +24,10 @@ final class MinimailNotifier: NSObject, UNUserNotificationCenterDelegate {
 
         // Registering category + actions lets banners surface Reply /
         // Mark-Read / Archive buttons inline (hold-to-reveal on macOS).
-        let reply = UNTextInputNotificationAction(
+        let reply = UNNotificationAction(
             identifier: Self.replyActionID,
             title: "Reply",
-            options: [.authenticationRequired],
-            textInputButtonTitle: "Send",
-            textInputPlaceholder: "Reply…"
+            options: [.foreground, .authenticationRequired]
         )
         let markRead = UNNotificationAction(
             identifier: Self.markReadActionID,
@@ -68,7 +67,8 @@ final class MinimailNotifier: NSObject, UNUserNotificationCenterDelegate {
             return
         }
         let newOnes = messages.filter { msg in
-            msg.direction == "received" && !seenIDs.contains(msg.id)
+            msg.isUnread && !seenIDs.contains(msg.id)
+                && (Dates.parse(msg.created_at) ?? .distantPast) >= startedAt
         }
         for msg in newOnes {
             fire(for: msg)
@@ -127,28 +127,15 @@ final class MinimailNotifier: NSObject, UNUserNotificationCenterDelegate {
         Task { @MainActor in
             guard let id else { completionHandler(); return }
             switch actionID {
+            case UNNotificationDismissActionIdentifier:
+                break
             case Self.markReadActionID:
-                try? await EmailCLI.shared.markRead(ids: [id])
-                if let appState = self.popoverOpener?.appState {
-                    await appState.refreshInbox(pull: false)
-                }
+                await self.popoverOpener?.appState.markRead(ids: [id])
             case Self.archiveActionID:
-                try? await EmailCLI.shared.archive(ids: [id])
-                if let appState = self.popoverOpener?.appState {
-                    await appState.refreshInbox(pull: false)
-                }
+                await self.popoverOpener?.appState.archive(ids: [id])
             case Self.replyActionID:
-                if !replyText.isEmpty {
-                    try? await EmailCLI.shared.reply(
-                        to: id,
-                        all: false,
-                        from: nil,
-                        cc: [],
-                        bcc: [],
-                        text: replyText,
-                        html: nil
-                    )
-                }
+                self.popoverOpener?.openFromNotification(messageID: nil)
+                await self.popoverOpener?.appState.replyFromNotification(id: id, text: replyText)
             default:
                 self.popoverOpener?.openFromNotification(messageID: id)
             }

@@ -6,6 +6,7 @@ struct ComposeView: View {
     @Environment(AppState.self) private var state
     @FocusState private var focus: Field?
     @State private var dropHighlight: Bool = false
+    @State private var confirmDiscard = false
     @State private var sendWarning: SendWarning?
     /// Held by the rich-text toolbar so buttons can reach the live NSTextView.
     @State private var editorHandle = RichTextEditorHandle()
@@ -55,8 +56,7 @@ struct ComposeView: View {
             }
             // Reply-To row. Hidden until the user enables it from the
             // header's overflow menu (rare power-user feature) or until
-            // something is already in the field (e.g. after we add draft
-            // persistence in a future round). When set, replies to the
+            // something is already saved in the draft. When set, replies to the
             // outgoing message route to this address rather than the From
             // account — the same gotcha the reader's orange ribbon warns
             // about, surfaced here on the compose side.
@@ -73,6 +73,13 @@ struct ComposeView: View {
                 attachmentsRow
                 Divider().opacity(0.1)
             }
+            if state.compose.isLoadingAttachments {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Downloading original attachments…").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }.padding(10)
+            }
 
             RichTextToolbar(textViewProvider: { editorHandle.textView })
             Divider().opacity(0.1)
@@ -87,10 +94,17 @@ struct ComposeView: View {
 
             footer
         }
+        .disabled(state.compose.isSending)
+        .onChange(of: state.compose.replyTo) { _, _ in state.scheduleAutosave() }
+        .onChange(of: state.compose.scheduledAt) { _, _ in state.scheduleAutosave() }
+        .confirmationDialog("Discard this draft?", isPresented: $confirmDiscard, titleVisibility: .visible) {
+            Button("Discard Draft", role: .destructive) { Task { await state.discardDraft() } }
+            Button("Keep Editing", role: .cancel) { }
+        }
         .onAppear {
             if state.compose.to.isEmpty {
                 focus = .to
-            } else if state.compose.body.isEmpty {
+            } else {
                 // Hand focus to the NSTextView after the window exists.
                 DispatchQueue.main.async {
                     if let tv = editorHandle.textView {
@@ -179,6 +193,7 @@ struct ComposeView: View {
 
     /// Shared send entrypoint — validations, then hands to AppState.
     private func attemptSend() {
+        NotificationCenter.default.post(name: .minimailCommitRecipients, object: nil)
         if let warning = validateBeforeSend() {
             sendWarning = warning
             return
@@ -188,6 +203,7 @@ struct ComposeView: View {
 
     private func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
         var accepted = false
+        let generation = state.compose.generation
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 accepted = true
@@ -207,6 +223,7 @@ struct ComposeView: View {
                             // compose.attachments directly and the debounce
                             // scheduler stayed idle — closing the popover
                             // before typing dropped the file on the floor.
+                            guard state.compose.generation == generation else { return }
                             state.addAttachment(url)
                         }
                     }
@@ -244,12 +261,7 @@ struct ComposeView: View {
     private var header: some View {
         HStack(spacing: 6) {
             Button {
-                Task { await state.flushAutosave() }
-                if let id = state.compose.replyToID {
-                    state.router.currentView = .reader(id)
-                } else {
-                    state.router.currentView = .inbox
-                }
+                Task { await state.navigate(to: .inbox) }
             } label: {
                 Image(systemName: "xmark")
             }
@@ -296,9 +308,9 @@ struct ComposeView: View {
                 }
                 Divider()
                 Button("Discard Draft", role: .destructive) {
-                    Task { await state.discardDraft() }
+                    confirmDiscard = true
                 }
-                .disabled(state.compose.editingDraftID == nil)
+                .disabled(!state.compose.hasContent && state.compose.editingDraftID == nil)
             } label: {
                 Image(systemName: "ellipsis")
                     .frame(width: 28, height: 28)
@@ -548,7 +560,9 @@ struct ComposeView: View {
                 Text(err)
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
-                    .lineLimit(1)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(err)
             } else {
                 Text(subtitle)
                     .font(.system(size: 11))
@@ -584,10 +598,10 @@ struct ComposeView: View {
 
             sendButton
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(state.compose.isSending || state.compose.to.splitAddressTokens().isEmpty)
+                .disabled(state.compose.isSending || state.deliveringSend != nil)
 
             scheduleMenu
-                .disabled(state.compose.isSending || state.compose.to.splitAddressTokens().isEmpty)
+                .disabled(state.compose.isSending || state.deliveringSend != nil)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -647,18 +661,10 @@ struct ComposeView: View {
     /// Quick-pick schedule options. Computed against `now` so each menu
     /// open reflects the current clock — "Tomorrow morning" stays
     /// truthful even if the user left the window open overnight.
-    private static func scheduleOptions(now: Date) -> [(label: String, date: Date)] {
-        let calendar = Calendar.current
-        func nextAt(hour: Int, minute: Int = 0, after base: Date = now) -> Date {
-            var comps = calendar.dateComponents([.year, .month, .day], from: base)
-            comps.hour = hour
-            comps.minute = minute
-            var date = calendar.date(from: comps) ?? base
-            if date <= base { date = calendar.date(byAdding: .day, value: 1, to: date) ?? date }
-            return date
-        }
-        let tomorrowMorning = nextAt(hour: 9)
-        let tomorrowEvening = nextAt(hour: 17)
+    static func scheduleOptions(now: Date, calendar: Calendar = .current) -> [(label: String, date: Date)] {
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
+        let tomorrowMorning = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+        let tomorrowEvening = calendar.date(bySettingHour: 17, minute: 0, second: 0, of: tomorrow) ?? tomorrow
         // Next-Monday morning. Calendar weekday: 1 = Sunday on en_US;
         // .nextDate handles locale-aware first-day-of-week shifts.
         let mondayMorning = calendar.nextDate(

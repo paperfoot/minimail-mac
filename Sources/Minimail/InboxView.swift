@@ -2,6 +2,10 @@ import SwiftUI
 
 struct InboxView: View {
     @Environment(AppState.self) private var state
+    var expanded = false
+    @FocusState private var searchFocused: Bool
+    @State private var pendingDeleteIDs: [Int64] = []
+    @State private var pendingDeleteDraft: Draft?
 
     var body: some View {
         let inbox = state.inbox
@@ -10,10 +14,12 @@ struct InboxView: View {
         @Bindable var boundInbox = inbox
 
         VStack(spacing: 0) {
-            header(session: session)
-            Divider().opacity(0.25)
-            folderRow(inbox: inbox)
-            Divider().opacity(0.15)
+            if !expanded {
+                header(session: session)
+                Divider().opacity(0.25)
+                folderRow(inbox: inbox)
+                Divider().opacity(0.15)
+            }
             searchRow(bound: $boundInbox.searchQuery)
             Divider().opacity(0.15)
             if let err = inbox.error {
@@ -27,6 +33,29 @@ struct InboxView: View {
             messageList
             footer
         }
+        .confirmationDialog("Permanently delete these messages?", isPresented: Binding(
+            get: { !pendingDeleteIDs.isEmpty },
+            set: { if !$0 { pendingDeleteIDs = [] } }
+        )) {
+            Button("Delete \(pendingDeleteIDs.count) Message\(pendingDeleteIDs.count == 1 ? "" : "s")", role: .destructive) {
+                let ids = pendingDeleteIDs
+                pendingDeleteIDs = []
+                Task { await state.deleteMessages(ids: ids) }
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteIDs = [] }
+        } message: { Text("This removes the local messages and cannot be undone.") }
+        .confirmationDialog("Discard this draft?", isPresented: Binding(
+            get: { pendingDeleteDraft != nil },
+            set: { if !$0 { pendingDeleteDraft = nil } }
+        )) {
+            Button("Discard Draft", role: .destructive) {
+                if let draft = pendingDeleteDraft { Task { await state.deleteDraft(draft) } }
+                pendingDeleteDraft = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteDraft = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .minimailFocusSearch)) { _ in searchFocused = true }
+        .background(Button("") { searchFocused = true }.keyboardShortcut("f", modifiers: .command).hidden())
         .onAppear {
             // Land the keyboard selection on the first unread message when
             // the inbox first appears — saves the user pressing j to get to
@@ -85,7 +114,7 @@ struct InboxView: View {
 
             Spacer()
 
-            Button { state.startCompose() } label: {
+            Button { Task { await state.saveComposeAndStartNew() } } label: {
                 Image(systemName: "square.and.pencil")
             }
             .buttonStyle(IconButtonStyle())
@@ -103,35 +132,38 @@ struct InboxView: View {
                 }
             }
             .buttonStyle(IconButtonStyle())
-            .help("Refresh (⌘R)")
+            .help("Check for new mail (⇧⌘N)")
             .accessibilityLabel(state.inbox.syncState == .syncing ? "Syncing" : "Refresh inbox")
-            .keyboardShortcut("r", modifiers: .command)
+            .keyboardShortcut("n", modifiers: [.command, .shift])
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
     }
 
     private func folderRow(inbox: InboxState) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
+        HStack {
+            Menu {
                 ForEach(InboxState.Folder.allCases, id: \.self) { folder in
-                    FolderTab(
-                        title: folder.rawValue,
-                        count: badge(for: folder, inbox: inbox),
-                        selected: inbox.currentFolder == folder
-                    ) {
-                        inbox.currentFolder = folder
-                        inbox.focusedRowIndex = -1
-                        inbox.clearSelection()
-                        if folder == .drafts {
-                            Task { await state.refreshDrafts() }
-                        }
+                    Button {
+                        Task { await state.selectFolder(folder) }
+                    } label: {
+                        Label(folder.rawValue + (badge(for: folder, inbox: inbox).map { " (\($0))" } ?? ""), systemImage: folder.symbol)
                     }
                 }
+            } label: {
+                Label(inbox.currentFolder.rawValue, systemImage: inbox.currentFolder.symbol)
+                    .font(.system(size: 12, weight: .semibold))
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel("Mailboxes: \(inbox.currentFolder.rawValue)")
+            Spacer()
+            if let count = badge(for: inbox.currentFolder, inbox: inbox) {
+                Text("\(count)").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 
     private func badge(for folder: InboxState.Folder, inbox: InboxState) -> Int? {
@@ -147,7 +179,7 @@ struct InboxView: View {
             // have loaded still contribute). Mirror of inbox.totalUnread.
             return inbox.totalUnread > 0 ? inbox.totalUnread : nil
         case .starred:
-            let n = inbox.messages.filter { $0.isStarred && !$0.isArchived }.count
+            let n = AppState.mergeMessages(inbox.messages + inbox.snoozedMessages).filter { $0.isStarred }.count
             return n > 0 ? n : nil
         case .snoozed:
             let n = inbox.snoozedMessages.count
@@ -165,7 +197,9 @@ struct InboxView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12))
-            TextField("Search", text: bound)
+            TextField("Search all mail", text: bound)
+                .focused($searchFocused)
+                .accessibilityLabel("Search all mail")
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
                 // Free-text search only for the widget (per product-split.md
@@ -174,6 +208,10 @@ struct InboxView: View {
                 .onChange(of: bound.wrappedValue) { _, _ in
                     state.scheduleSearch()
                 }
+            if !bound.wrappedValue.isEmpty {
+                Button { bound.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain).accessibilityLabel("Clear search")
+            }
             if state.inbox.isSearching {
                 ProgressView()
                     .controlSize(.small)
@@ -195,14 +233,50 @@ struct InboxView: View {
 
     @ViewBuilder
     private var messageList: some View {
-        if !state.inbox.selection.isEmpty {
+        if state.inbox.selection.count > (expanded ? 1 : 0) {
             selectionBar
             Divider().opacity(0.2)
         }
         if state.inbox.currentFolder == .drafts {
             draftsList
+        } else if expanded {
+            nativeMessageList
         } else {
             regularList
+        }
+    }
+
+    private var nativeMessageList: some View {
+        let visible = state.inbox.visible()
+        return List(selection: Binding(
+            get: { state.inbox.selection },
+            set: { ids in
+                Task {
+                    guard await state.prepareToLeaveCompose() else { return }
+                    state.inbox.selection = ids
+                    if ids.count == 1, let id = ids.first, let message = visible.first(where: { $0.id == id }) {
+                        state.open(message: message)
+                    } else { state.back() }
+                }
+            }
+        )) {
+            ForEach(visible) { message in
+                WindowMessageRow(message: message)
+                    .tag(message.id)
+                    .contextMenu { messageContextMenu(for: message) }
+            }
+            if state.inbox.canLoadMore && state.inbox.searchQuery.isEmpty {
+                Button(state.inbox.isLoadingMore ? "Loading…" : "Load Older Messages") {
+                    Task { await state.loadMoreMessages() }
+                }.disabled(state.inbox.isLoadingMore)
+            }
+        }
+        .listStyle(.inset)
+        .overlay {
+            if visible.isEmpty && (!state.inbox.searchQuery.isEmpty || !state.inbox.canLoadMore) {
+                if state.inbox.isSearching || state.inbox.syncState == .syncing { ProgressView() }
+                else { emptyState }
+            }
         }
     }
 
@@ -215,24 +289,28 @@ struct InboxView: View {
             Button {
                 Task { await state.bulkArchive() }
             } label: {
-                Label("Archive", systemImage: "archivebox")
-                    .font(.system(size: 11))
+                Image(systemName: state.inbox.currentFolder == .archived ? "tray.and.arrow.down" : "archivebox")
+                    .help(state.inbox.currentFolder == .archived ? "Move selected messages to Inbox" : "Archive selected messages")
+                    .accessibilityLabel(state.inbox.currentFolder == .archived ? "Move selected messages to Inbox" : "Archive selected messages")
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             Button {
                 Task { await state.bulkMarkRead() }
             } label: {
-                Label("Mark Read", systemImage: "envelope.open")
-                    .font(.system(size: 11))
+                Image(systemName: "envelope.open").help("Mark selected messages as read").accessibilityLabel("Mark selected messages as read")
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            Menu {
+                Button("Mark as Read") { Task { await state.bulkMarkRead() } }
+                Button("Mark as Unread") { Task { await state.bulkMarkUnread() } }
+            } label: { Image(systemName: "envelope.badge") }
+            .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Read status for selected messages")
             Button(role: .destructive) {
-                Task { await state.bulkDelete() }
+                pendingDeleteIDs = Array(state.inbox.selection)
             } label: {
-                Label("Delete", systemImage: "trash")
-                    .font(.system(size: 11))
+                Image(systemName: "trash").help("Delete selected messages").accessibilityLabel("Delete selected messages")
             }
             .buttonStyle(.plain)
             .foregroundStyle(.red)
@@ -265,9 +343,14 @@ struct InboxView: View {
                     }
                 } else {
                     ForEach(visible) { draft in
-                        DraftRow(draft: draft)
-                            .contentShape(Rectangle())
-                            .onTapGesture { state.edit(draft: draft) }
+                        Button { Task { await state.openDraft(draft) } } label: {
+                            DraftRow(draft: draft).contentShape(Rectangle())
+                        }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button("Open Draft") { Task { await state.openDraft(draft) } }
+                                Button("Discard Draft…", role: .destructive) { pendingDeleteDraft = draft }
+                            }
                         Divider().opacity(0.15)
                     }
                 }
@@ -296,7 +379,7 @@ struct InboxView: View {
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
-                    if visible.isEmpty, state.inbox.syncState != .syncing {
+                    if visible.isEmpty, state.inbox.syncState != .syncing, !state.inbox.isSearching {
                         emptyState
                     } else {
                         ForEach(groups, id: \.label) { group in
@@ -329,6 +412,11 @@ struct InboxView: View {
                             }
                         }
                     }
+                    if state.inbox.canLoadMore && state.inbox.searchQuery.isEmpty {
+                        Button(state.inbox.isLoadingMore ? "Loading…" : "Load Older Messages") {
+                            Task { await state.loadMoreMessages() }
+                        }.disabled(state.inbox.isLoadingMore).padding(12)
+                    }
                 }
             }
             .onKeyPress(.upArrow) { moveFocus(-1, visible: visible, proxy: proxy); return .handled }
@@ -352,19 +440,16 @@ struct InboxView: View {
 
     @ViewBuilder
     private func messageContextMenu(for msg: Message) -> some View {
-        Button("Open") { state.open(message: msg) }
+        Button("Open") { Task { if await state.prepareToLeaveCompose() { state.open(message: msg) } } }
         Divider()
         Button("Reply") {
-            state.open(message: msg)
-            state.startCompose(replyTo: msg)
+            Task { await state.composeReply(to: msg) }
         }
         Button("Reply All") {
-            state.open(message: msg)
-            state.startCompose(replyTo: msg, replyAll: true)
+            Task { await state.composeReply(to: msg, replyAll: true) }
         }
         Button("Forward") {
-            state.open(message: msg)
-            state.startForward(of: msg)
+            Task { await state.composeReply(to: msg, forward: true) }
         }
         Divider()
         Button(msg.isStarred ? "Unstar" : "Star") {
@@ -399,7 +484,7 @@ struct InboxView: View {
         }
         Divider()
         Button("Delete", role: .destructive) {
-            Task { await state.delete(message: msg) }
+            pendingDeleteIDs = [msg.id]
         }
     }
 
@@ -474,11 +559,12 @@ struct InboxView: View {
                     .font(.system(size: 13))
             }
             .buttonStyle(IconButtonStyle())
-            .help("Mark all read")
-            .accessibilityLabel("Mark all as read")
+            .help("Mark all messages as read")
+            .accessibilityLabel("Mark all messages as read")
             .disabled(state.inbox.totalUnread == 0)
 
-            Button { state.router.currentView = .settings } label: {
+            if !expanded {
+            Button { Task { await state.navigate(to: .settings) } } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 13))
             }
@@ -486,6 +572,7 @@ struct InboxView: View {
             .help("Settings")
             .accessibilityLabel("Settings")
             .keyboardShortcut(",", modifiers: .command)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -557,7 +644,7 @@ struct MessageRow: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.yellow)
                     }
-                    Text(message.fromParts.name ?? message.fromParts.email)
+                    Text(message.correspondent)
                         .font(.system(size: 13, weight: message.isUnread ? .semibold : .regular))
                         .lineLimit(1)
                     if message.has_attachments == true {
@@ -635,14 +722,17 @@ struct MessageRow: View {
             .accessibilityLabel(message.isStarred ? "Unstar message" : "Star message")
 
             Button {
-                Task { await state.archive(ids: [message.id]) }
+                Task {
+                    if message.isArchived { await state.unarchive(message: message) }
+                    else { await state.archive(ids: [message.id]) }
+                }
             } label: {
-                Image(systemName: "archivebox")
+                Image(systemName: message.isArchived ? "tray.and.arrow.down" : "archivebox")
                     .foregroundStyle(HierarchicalShapeStyle.tertiary)
             }
             .buttonStyle(.plain)
-            .help("Archive")
-            .accessibilityLabel("Archive message")
+            .help(message.isArchived ? "Move to Inbox" : "Archive")
+            .accessibilityLabel(message.isArchived ? "Move to Inbox" : "Archive message")
         }
         .font(.system(size: 12))
     }
@@ -757,16 +847,16 @@ enum Dates {
 @MainActor
 enum DateFormat {
     private static let timeOnly: DateFormatter = {
-        let f = DateFormatter(); f.locale = .current; f.dateFormat = "h:mm a"; return f
+        let f = DateFormatter(); f.locale = .current; f.timeStyle = .short; return f
     }()
     private static let weekday: DateFormatter = {
         let f = DateFormatter(); f.locale = .current; f.dateFormat = "EEE"; return f
     }()
     private static let monthDay: DateFormatter = {
-        let f = DateFormatter(); f.locale = .current; f.dateFormat = "MMM d"; return f
+        let f = DateFormatter(); f.locale = .current; f.setLocalizedDateFormatFromTemplate("MMMd"); return f
     }()
     private static let shortDate: DateFormatter = {
-        let f = DateFormatter(); f.locale = .current; f.dateFormat = "M/d/yy"; return f
+        let f = DateFormatter(); f.locale = .current; f.dateStyle = .short; return f
     }()
     private static let fullDate: DateFormatter = {
         let f = DateFormatter(); f.locale = .current; f.dateStyle = .medium; f.timeStyle = .short; return f
@@ -843,8 +933,9 @@ struct AccountAvatar: View {
     }
 
     private func color(for email: String) -> Color {
-        let hash = abs(email.hashValue)
+        // Stable between launches and safe even for Int.min (abs would trap).
+        let hash = email.lowercased().utf8.reduce(UInt64(5381)) { ($0 &* 33) &+ UInt64($1) }
         let colors: [Color] = [.blue, .purple, .pink, .orange, .green, .teal, .indigo, .red]
-        return colors[hash % colors.count]
+        return colors[Int(hash % UInt64(colors.count))]
     }
 }

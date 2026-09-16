@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+extension Notification.Name {
+    /// Requests every live recipient field to commit its un-tokenized text.
+    static let minimailCommitRecipients = Notification.Name("Minimail.commitRecipients")
+}
+
 /// Pure-SwiftUI recipient token field with a Liquid Glass autocomplete
 /// popover. Replaces the previous NSTokenField wrapper whose Cocoa completion
 /// dropdown couldn't be themed. All standard shortcuts still work because
@@ -30,6 +35,7 @@ struct EmailTokenField<F: Hashable>: View {
 
     @State private var draft: String = ""
     @State private var highlightedIndex: Int = 0
+    @State private var suggestionsDismissed = false
 
     private var isFocused: Bool { focus.wrappedValue == focusValue }
 
@@ -54,19 +60,23 @@ struct EmailTokenField<F: Hashable>: View {
         return Array(scored.prefix(6).map(\.0))
     }
 
+    private var presentedSuggestions: [String] {
+        suggestionsDismissed ? [] : filtered
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             fieldRow
-            if isFocused, !filtered.isEmpty {
+            if isFocused, !presentedSuggestions.isEmpty {
                 SuggestionPopover(
-                    suggestions: filtered,
+                    suggestions: presentedSuggestions,
                     highlightedIndex: highlightedIndex,
                     onPick: { pick($0) }
                 )
                 .offset(y: 28)
                 .zIndex(100)
                 .transition(.opacity.combined(with: .move(edge: .top)))
-                .animation(.easeOut(duration: 0.12), value: filtered)
+                .animation(.easeOut(duration: 0.12), value: presentedSuggestions)
             }
         }
     }
@@ -92,18 +102,18 @@ struct EmailTokenField<F: Hashable>: View {
                     }
                 }
                 .onKeyPress(.downArrow) {
-                    guard !filtered.isEmpty else { return .ignored }
-                    highlightedIndex = min(filtered.count - 1, highlightedIndex + 1)
+                    guard !presentedSuggestions.isEmpty else { return .ignored }
+                    highlightedIndex = min(presentedSuggestions.count - 1, highlightedIndex + 1)
                     return .handled
                 }
                 .onKeyPress(.upArrow) {
-                    guard !filtered.isEmpty else { return .ignored }
+                    guard !presentedSuggestions.isEmpty else { return .ignored }
                     highlightedIndex = max(0, highlightedIndex - 1)
                     return .handled
                 }
                 .onKeyPress(.return) {
-                    if !filtered.isEmpty, filtered.indices.contains(highlightedIndex) {
-                        pick(filtered[highlightedIndex])
+                    if presentedSuggestions.indices.contains(highlightedIndex) {
+                        pick(presentedSuggestions[highlightedIndex])
                         return .handled
                     }
                     commitDraft()
@@ -116,8 +126,8 @@ struct EmailTokenField<F: Hashable>: View {
                 // popover it commits the draft and lets focus advance.
                 .onKeyPress(keys: [.tab], phases: .down) { press in
                     if press.modifiers.contains(.shift) { return .ignored }
-                    if !filtered.isEmpty, filtered.indices.contains(highlightedIndex) {
-                        pick(filtered[highlightedIndex])
+                    if presentedSuggestions.indices.contains(highlightedIndex) {
+                        pick(presentedSuggestions[highlightedIndex])
                         return .handled
                     }
                     if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -126,9 +136,9 @@ struct EmailTokenField<F: Hashable>: View {
                     return .ignored
                 }
                 .onKeyPress(.escape) {
-                    if !filtered.isEmpty {
+                    if !presentedSuggestions.isEmpty {
                         // Hide the popover without inserting.
-                        draft = ""
+                        suggestionsDismissed = true
                         return .handled
                     }
                     return .ignored
@@ -140,6 +150,9 @@ struct EmailTokenField<F: Hashable>: View {
                         return .handled
                     }
                     return .ignored
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .minimailCommitRecipients)) { _ in
+                    commitDraft()
                 }
         }
         // Clicking anywhere in the row (pill gaps, empty area to the right
@@ -155,18 +168,12 @@ struct EmailTokenField<F: Hashable>: View {
 
     private func handleDraftChange(_ new: String) {
         highlightedIndex = 0
+        suggestionsDismissed = false
         // Commit on comma / semicolon / newline. Space is kept as-is so the
         // user can type multi-word display names without losing them.
-        if let last = new.last, ",;\n\t".contains(last) {
-            let cleaned = new
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: ",;"))
-            if !cleaned.isEmpty { addToken(cleaned) }
-            draft = ""
-            return
-        }
-        // Multi-paste — if the pasted text contains delimiters, split it all.
-        if new.contains(where: { ",;\n\t".contains($0) }) {
+        // Only delimiters outside quoted display names and angle brackets
+        // separate addresses; this mirrors String.splitAddressTokens().
+        if Self.hasTopLevelAddressDelimiter(new) {
             let parts = Self.split(new)
             for part in parts { addToken(part) }
             draft = ""
@@ -183,6 +190,7 @@ struct EmailTokenField<F: Hashable>: View {
         addToken(email)
         draft = ""
         highlightedIndex = 0
+        suggestionsDismissed = false
         // Restore focus after a mouse-click pick — clicking the suggestion
         // button briefly steals first-responder, leaving the field blurred
         // and the user unable to type another recipient without re-clicking.
@@ -207,6 +215,27 @@ struct EmailTokenField<F: Hashable>: View {
 
     static func split(_ string: String) -> [String] {
         string.splitAddressTokens()
+    }
+
+    private static func hasTopLevelAddressDelimiter(_ string: String) -> Bool {
+        var inQuotes = false
+        var angleDepth = 0
+
+        for character in string {
+            switch character {
+            case "\"":
+                inQuotes.toggle()
+            case "<":
+                if !inQuotes { angleDepth += 1 }
+            case ">":
+                if !inQuotes, angleDepth > 0 { angleDepth -= 1 }
+            case ",", ";", "\n", "\t":
+                if !inQuotes, angleDepth == 0 { return true }
+            default:
+                break
+            }
+        }
+        return false
     }
 }
 

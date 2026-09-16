@@ -2,7 +2,7 @@
 
 # Minimail
 
-**Menu bar email client for macOS. The human-facing half of an agent-first email stack.**
+**A compact menu-bar inbox that expands into a native macOS mail window.**
 
 <br />
 
@@ -12,7 +12,7 @@
 
 ---
 
-A 420×580 popover that lives in your menu bar. Glance at the inbox, reply in a sentence, star or snooze a thread, and close it again. Minimail is the human interface for `email-cli` — the Rust engine that AI agents use to send and receive mail on your behalf.
+Start with a 420×580 menu-bar inbox, then expand into a resizable three-column mail window. Read threads, compose with attachments, manage accounts, or return to the compact view without losing your place. Minimail is the human interface for `email-cli` — the Rust engine that AI agents use to send and receive mail on your behalf.
 
 [Why](#why) | [Two Components](#two-components) | [Install](#install) | [Features](#features) | [Business Model](#business-model)
 
@@ -24,7 +24,7 @@ You gave your AI agent an email address. The agent runs inside whatever harness 
 
 You still want to peek at the inbox sometimes. Reply to a human when the agent flags one. Recap the day without tailing a log file.
 
-Minimail is that peek. Click the menu bar icon, see the inbox, hit `r` to reply, close the popover. First launch asks for the Resend key and sender address; after that it stays out of the Dock and lives in the menu bar.
+Click the menu bar icon for a quick check, or choose **Open Mail Window** for a full workspace. First launch asks for the Resend key and sender address. The app appears in the Dock while its mail window is open and returns to the menu bar when you close it.
 
 ## Two Components
 
@@ -33,9 +33,9 @@ Minimail is one half of a product. The other half is a Rust CLI.
 | Component | For | Install | License |
 |---|---|---|---|
 | **email-cli** | AI agents. Any harness that invokes a CLI — Claude Code, Cursor, Codex, Warp, Gemini CLI, shell scripts. | `brew install paperfoot/tap/email-cli` | MIT, free |
-| **Minimail** (this repo) | Humans. Quick visual check of what the agent did. Reply in five seconds, star, snooze, archive. | DMG (paid, coming soon) | Proprietary |
+| **Minimail** (this repo) | Humans. Read, compose, search, and manage the same mailboxes as their agents. | DMG (paid, coming soon) | Proprietary |
 
-The CLI is the primary interface. It does everything Minimail does — `send`, `inbox ls`, `reply`, `draft`, `broadcast`, 50+ commands in total. Minimail shells out to it for every operation. No business logic lives in the Swift code.
+The CLI is the primary interface. It does everything Minimail does — `send`, `inbox ls`, `reply`, `draft`, `broadcast`, 50+ commands in total. Minimail uses it for mailbox and delivery operations. Swift owns presentation, navigation, draft editing, and the Undo Send countdown.
 
 Think of it as: **email-cli is the backend your agent uses.** **Minimail is the window you open when you want to see what happened.**
 
@@ -56,7 +56,7 @@ On macOS, already using email-cli with an agent? Minimail buys you five-second c
 
 ### Get Minimail
 
-Paid release coming soon. To build from source today:
+Download the signed, notarized DMG from [GitHub Releases](https://github.com/paperfoot/minimail-mac/releases/latest), or build from source:
 
 ```bash
 ./scripts/build-app.sh
@@ -68,16 +68,21 @@ Requires Xcode 26 (Swift 6 toolchain).
 ## Features
 
 - **Menu bar popover** — 420×580, persistent behaviour. Stays open while you work in other apps.
-- **Gmail-style inbox** — day-grouped rows, two-line preview (subject + snippet), hover actions, bulk select.
+- **Full mail window** — native mailbox sidebar, resizable columns, message selection with ⌘/Shift, and a reading or composing pane.
+- **Status-item menu** — right-click for Open Mail Window, New Message, Check Mail, Settings, and Quit.
+- **Inbox** — day-grouped compact rows, sender and subject previews, context actions, bulk selection, and older-message pagination.
 - **Threaded reader** — collapsed quoted text, tracking-pixel badge, star / snooze / unsubscribe in the header.
 - **Rich-text compose** — ⌘B/I/U, paste rich text, drag-drop attachments, signature preview.
 - **Undo send** — 10-second grace period after hitting Send.
 - **Multiple accounts** — `⌘1–9` account switcher. Per-account mute for noisy inboxes.
-- **Native notifications** — `UNUserNotificationCenter` with inline Reply / Mark Read / Archive action buttons.
-- **Search operators** — `from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `is:starred`.
+- **Native notifications** — Reply opens a draft for review; Mark Read and Archive act on the selected message.
+- **Full-text search** — ⌘F searches the local mailbox across folders, within the selected account or all accounts. Up to 500 results; structured operators are not supported in the GUI.
+- **Persistent drafts** — recipients, sender, Reply-To, rich text, attachments, and scheduled time survive reopening.
+- **Account and delivery settings** — add, edit, remove, and choose default accounts; manage profiles and signatures; inspect Outbox and retry failed delivery with the original request identity.
+- **Email links** — open `mailto:` links as drafts for review.
 - **Starred / Snoozed folders** — surface what matters, defer what doesn't.
 - **Liquid Glass** — toasts, popovers, autocomplete, account capsule. Apple's native material, no custom shadows.
-- **Zero local database.** The CLI owns the data; Minimail is a view.
+- **One shared local database.** The CLI owns SQLite; Minimail and agents use the same mailbox.
 
 ## How It Works
 
@@ -111,27 +116,27 @@ Minimail does not talk to Resend. It does not touch the SQLite database. It runs
 
 ## Architecture Notes
 
-- `AppDelegate` — `NSStatusItem` + `NSPopover` (applicationDefined behaviour).
-- `RootView` — SwiftUI, hosted via `NSHostingController`. Survives show/hide.
+- `AppDelegate` — `NSStatusItem`, `NSPopover`, and a resizable `NSWindow`; one presentation is mounted at a time.
+- `RootView` — SwiftUI, hosted via `NSHostingController`; shared state survives presentation changes.
 - `AppState` — `@Observable`, single source of truth for UI state.
 - `EmailCLI` — Swift actor. Shells out to the Rust binary, decodes JSON envelopes, honours semantic exit codes.
-- `WKWebView` — renders HTML bodies with JavaScript disabled and remote images blocked by default.
+- `WKWebView` — blocks message JavaScript and remote assets by default; an isolated app script measures document height.
 
 See [`CLAUDE.md`](CLAUDE.md) for the non-obvious rules we've learned the hard way. Read that before modifying code.
 
 ## FAQ
 
 **Do I need email-cli installed separately?**
-No. The `.app` bundle ships a vendored copy. Open Settings -> Command line tool to install/update that same binary for Terminal and agents.
+No. The `.app` bundle ships a vendored copy. Open Settings → Advanced → Command line tool to install/update that same binary for Terminal and agents.
 
 **What data leaves my machine?**
-Outgoing mail bodies go to Resend. Incoming mail arrives via Resend webhooks. Everything else — drafts, read state, local cache — lives in SQLite on your machine. Resend API keys live in the macOS Keychain. Minimail itself makes no direct network calls; the CLI does.
+Outgoing mail bodies go to Resend. Incoming mail arrives via Resend webhooks. Everything else — drafts, read state, local cache — lives in SQLite on your machine. Profile credentials are managed by email-cli. Remote message assets remain blocked until you choose to load them.
 
 **Is this open source?**
 `email-cli` is MIT. Minimail is paid commercial software. Source is visible so you can audit it, but the license is proprietary. See [LICENSE](LICENSE) and [docs/legal/eula.md](docs/legal/eula.md).
 
 **Is there a Linux or Windows version?**
-No. The CLI works everywhere (`cargo install email-cli`). Minimail is macOS-only and will stay that way — it's a menu bar app built on Apple's Liquid Glass design system.
+No. The CLI works everywhere (`cargo install email-cli`). Minimail is macOS-only and will stay that way — it uses native AppKit windows, SwiftUI controls, and Liquid Glass navigation surfaces.
 
 **Why not ship this as an MCP server?**
 MCP adds a network hop, a process-lifecycle problem, and a config burden per agent harness. One signed binary is simpler: agents install it, run `agent-info` once, and work from memory.
@@ -141,6 +146,12 @@ MCP adds a network hop, a process-lifecycle problem, and a config burden per age
 - [Privacy Policy](docs/legal/privacy.md)
 - [Terms of Service](docs/legal/terms.md)
 - [End User License Agreement](docs/legal/eula.md)
+
+## Verification
+
+Run `./scripts/verify.sh` for Swift tests, a release build, and isolated bundled-helper checks. For interaction testing, run `swift build`, build the sibling CLI, then `python3 scripts/prepare-ui-fixture.py`. Open `.build/MinimailQA.app` for a separate offline mailbox; its helper blocks delivery and remote sync.
+
+The [September 2026 audit](docs/client-audit-2026-09.md) records coverage, fixes, and remaining scope.
 
 ## Contributing
 

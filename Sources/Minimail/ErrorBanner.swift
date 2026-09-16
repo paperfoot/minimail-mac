@@ -38,6 +38,7 @@ struct ErrorBanner: View {
 
             Button {
                 state.inbox.error = nil
+                state.inbox.searchError = nil
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9))
@@ -86,7 +87,7 @@ struct ErrorBanner: View {
         case .invalidAPIKey: return "API key isn't working"
         case .rateLimited(_, let retry):
             if let retry, retry > 0 {
-                return "Rate-limited. Retrying in \(Int(retry))s"
+                return "Rate limited. Try again in \(Int(retry))s"
             }
             return "Rate-limited"
         case .cliMissing: return "email-cli unavailable"
@@ -104,7 +105,7 @@ struct ErrorBanner: View {
         case .invalidAPIKey:
             return "Open Settings to re-enter your Resend key."
         case .rateLimited:
-            return "Resend briefly throttled the request. We'll retry automatically."
+            return "Resend briefly throttled the request. Wait a moment, then retry."
         case .cliMissing:
             return "Reinstall Minimail or install email-cli manually."
         case .diskFull:
@@ -131,7 +132,7 @@ struct ErrorBanner: View {
             }
         case .invalidAPIKey:
             return BannerAction(title: "Settings") {
-                state.router.currentView = .settings
+                Task { await state.navigate(to: .settings) }
             }
         case .rateLimited:
             return BannerAction(title: "Retry") {

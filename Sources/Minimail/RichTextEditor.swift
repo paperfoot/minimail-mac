@@ -50,6 +50,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = true
         textView.isGrammarCheckingEnabled = false
         textView.drawsBackground = false
+        textView.setAccessibilityLabel("Message body")
         textView.font = .systemFont(ofSize: 13)
         textView.textColor = .labelColor
         textView.linkTextAttributes = [
@@ -69,6 +70,11 @@ struct RichTextEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? NSTextView,
               let storage = textView.textStorage else { return }
+        // NSViewRepresentable keeps the coordinator alive across SwiftUI
+        // updates, so refresh its copy of this value to keep the current
+        // binding and callback rather than the ones captured at creation.
+        context.coordinator.parent = self
+        handle?.textView = textView
         // Skip the update we just triggered ourselves — otherwise the round-
         // trip from delegate → binding → updateNSView → textStorage.set…
         // would clobber the user's cursor position every keystroke.
@@ -79,7 +85,15 @@ struct RichTextEditor: NSViewRepresentable {
         if !storage.isEqual(to: attributedText) {
             let selection = textView.selectedRanges
             storage.setAttributedString(attributedText)
-            textView.selectedRanges = selection
+            // Replacing content can make a previous cursor or selection
+            // extend past the end of the new string. AppKit expects every
+            // restored range to fit the current text storage.
+            textView.selectedRanges = selection.map { value in
+                let range = value.rangeValue
+                let location = min(range.location, storage.length)
+                let length = min(range.length, storage.length - location)
+                return NSValue(range: NSRange(location: location, length: length))
+            }
         }
     }
 

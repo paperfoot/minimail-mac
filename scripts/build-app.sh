@@ -53,6 +53,21 @@ else
         echo "✗ email-cli at ${EMAIL_CLI} is missing the signature --html contract" >&2
         exit 1
     fi
+    draft_edit_help="$("${EMAIL_CLI}" draft edit --help)"
+    for required_flag in --reply-to --clear-schedule --clear-html; do
+        if [[ "${draft_edit_help}" != *"${required_flag}"* ]]; then
+            echo "✗ email-cli at ${EMAIL_CLI} is missing the draft edit ${required_flag} contract" >&2
+            exit 1
+        fi
+    done
+    profile_add_help="$("${EMAIL_CLI}" profile add --help)"
+    if [[ "${profile_add_help}" != *"--validate"* ]]; then
+        echo "✗ email-cli is missing validated profile updates" >&2
+        exit 1
+    fi
+    "${EMAIL_CLI}" account edit --help >/dev/null
+    "${EMAIL_CLI}" account remove --help >/dev/null
+    "${EMAIL_CLI}" profile remove --help >/dev/null
 fi
 
 # ── Build the .app layout ─────────────────────────────────────────────

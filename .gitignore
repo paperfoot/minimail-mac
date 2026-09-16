@@ -4,3 +4,6 @@ Package.resolved
 DerivedData/
 *.xcodeproj
 .DS_Store
+
+__pycache__/
+*.pyc

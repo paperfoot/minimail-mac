@@ -64,15 +64,40 @@ if [[ "${draft_help}" == *"--reply-to-msg"* ]]; then
 else
   fail_item "draft create missing --reply-to-msg"
 fi
+draft_edit_help="$("${CLI}" draft edit --help)"
+for required_flag in --reply-to --clear-schedule --clear-html; do
+  if [[ "${draft_edit_help}" == *"${required_flag}"* ]]; then
+    pass_item "draft edit supports ${required_flag}"
+  else
+    fail_item "draft edit missing ${required_flag}"
+  fi
+done
 
 echo
-echo "▸ Local configured-data smoke tests"
-if run_json "account list" account list; then
-  run_json "inbox stats" inbox stats || true
-  run_json "inbox list" inbox list --limit 2 || true
-else
-  echo "  - skipped mailbox smoke tests: no configured account or invalid key"
-fi
+echo "▸ Hermetic bundled CLI smoke tests"
+SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/minimail-verify.XXXXXX")"
+trap 'rm -rf "${SMOKE_DIR}"' EXIT
+SMOKE_DB="${SMOKE_DIR}/email-cli.db"
+run_json "account list" --db "${SMOKE_DB}" account list || true
+run_json "inbox stats" --db "${SMOKE_DB}" inbox stats || true
+run_json "inbox list" --db "${SMOKE_DB}" inbox list --limit 2 || true
+python3 - "${SMOKE_DB}" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("INSERT INTO profiles (name, api_key) VALUES ('smoke', 'offline-test-key')")
+    db.execute("INSERT INTO accounts (email, profile_name, display_name, signature, is_default) VALUES ('first@example.test', 'smoke', 'Before', 'Keep signature', 1)")
+    db.execute("INSERT INTO accounts (email, profile_name, is_default) VALUES ('second@example.test', 'smoke', 0)")
+PY
+run_json "account edit works offline with unchanged profile" --db "${SMOKE_DB}" account edit first@example.test --name After --profile smoke || true
+run_json "account remove and reassign default" --db "${SMOKE_DB}" account remove first@example.test --yes || true
+if python3 - "${SMOKE_DB}" <<'PY'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    assert db.execute("SELECT email FROM accounts WHERE is_default = 1").fetchone() == ('second@example.test',)
+PY
+then pass_item "removed default replaced deterministically"; else fail_item "replacement default"; fi
+run_json "remove final account" --db "${SMOKE_DB}" account remove second@example.test --yes || true
+run_json "remove unused profile" --db "${SMOKE_DB}" profile remove smoke --yes || true
 
 echo
 echo "─────────────────────────"

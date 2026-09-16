@@ -97,12 +97,16 @@ struct FlowLayout: Layout {
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxWidth = proposal.width ?? .infinity
+        let itemProposal = maxWidth.isFinite
+            ? ProposedViewSize(width: max(0, maxWidth), height: nil)
+            : .unspecified
         var rowWidth: CGFloat = 0
         var rowHeight: CGFloat = 0
         var totalHeight: CGFloat = 0
         for s in subviews {
-            let size = s.sizeThatFits(.unspecified)
-            if rowWidth + size.width > maxWidth, rowWidth > 0 {
+            let size = s.sizeThatFits(itemProposal)
+            let leadingSpacing = rowWidth > 0 ? spacing : 0
+            if rowWidth + leadingSpacing + size.width > maxWidth, rowWidth > 0 {
                 totalHeight += rowHeight + spacing
                 rowWidth = 0
                 rowHeight = 0
@@ -115,19 +119,28 @@ struct FlowLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let itemProposal = ProposedViewSize(width: max(0, bounds.width), height: nil)
         var x: CGFloat = bounds.minX
         var y: CGFloat = bounds.minY
         var rowHeight: CGFloat = 0
+        var rowHasItems = false
         for s in subviews {
-            let size = s.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX, x > bounds.minX {
+            let size = s.sizeThatFits(itemProposal)
+            var itemX = rowHasItems ? x + spacing : x
+            if itemX + size.width > bounds.maxX, rowHasItems {
                 x = bounds.minX
                 y += rowHeight + spacing
                 rowHeight = 0
+                rowHasItems = false
+                itemX = x
             }
-            s.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
-            x += size.width + spacing
+            s.place(
+                at: CGPoint(x: itemX, y: y),
+                proposal: ProposedViewSize(width: size.width, height: size.height)
+            )
+            x = itemX + size.width
             rowHeight = max(rowHeight, size.height)
+            rowHasItems = true
         }
     }
 }

@@ -22,6 +22,12 @@ struct Account: Decodable, Sendable, Identifiable, Hashable {
     let signature: String?
 }
 
+struct MailProfile: Decodable, Sendable, Identifiable, Hashable {
+    var id: String { name }
+    let name: String
+    let created_at: String?
+}
+
 struct Message: Decodable, Sendable, Identifiable, Hashable {
     let id: Int64
     let remote_id: String?
@@ -45,11 +51,11 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
     var is_read: Bool?
     let created_at: String?
     let synced_at: String?
-    let archived: Bool?
+    var archived: Bool?
     /// One-line snippet supplied by `inbox list` / `search` / `thread`.
     /// The full-message detail endpoint omits it (use `text_body` instead).
     let text_preview: String?
-    let starred: Bool?
+    var starred: Bool?
     /// ISO 8601 UTC timestamp. Non-nil when the message is currently snoozed.
     let snoozed_until: String?
     /// Raw `List-Unsubscribe` header (angle-bracketed URLs + mailtos).
@@ -69,6 +75,10 @@ struct Message: Decodable, Sendable, Identifiable, Hashable {
     var hasUnsubscribeLink: Bool {
         guard let s = list_unsubscribe else { return false }
         return !s.isEmpty
+    }
+    var correspondent: String {
+        if direction == "sent" { return "To: " + (to ?? []).joined(separator: ", ") }
+        return fromParts.name ?? fromParts.email
     }
     var displaySubject: String {
         if let s = subject, !s.isEmpty { return s }
@@ -140,6 +150,8 @@ struct Draft: Decodable, Sendable, Identifiable, Hashable {
     let text_body: String?
     let html_body: String?
     let reply_to_message_id: Int64?
+    let reply_to: [String]?
+    let scheduled_at: String?
     let created_at: String?
     let updated_at: String?
 }

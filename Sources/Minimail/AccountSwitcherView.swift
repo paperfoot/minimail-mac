@@ -32,7 +32,6 @@ struct AccountSwitcherView: View {
                     // every account's mail merged.
                     Button {
                         Task { await state.selectUnifiedInbox() }
-                        state.router.currentView = .inbox
                     } label: {
                         HStack(spacing: 10) {
                             ZStack {
@@ -72,7 +71,6 @@ struct AccountSwitcherView: View {
                     ForEach(Array(state.session.accounts.enumerated()), id: \.element.id) { idx, account in
                         Button {
                             Task { await state.selectAccount(at: idx + 1) }
-                            state.router.currentView = .inbox
                         } label: {
                             HStack(spacing: 10) {
                                 AccountAvatar(email: account.email)

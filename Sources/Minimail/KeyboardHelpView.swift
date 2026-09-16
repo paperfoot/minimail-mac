@@ -45,7 +45,10 @@ struct KeyboardHelpView: View {
                     ])
                     section("Inbox", rows: [
                         ("⌘ N", "New message"),
-                        ("⌘ R", "Refresh / reply in reader"),
+                        ("⌘ ⇧ N", "Check for new mail"),
+                        ("⌘ F", "Search all mail"),
+                        ("⌥ ⌘ 1", "Open full mail window"),
+                        ("⌘ R", "Reply"),
                         ("⌘ ⇧ R", "Reply all"),
                         ("⌘ ⇧ F", "Forward"),
                         ("⌘ ⌫", "Archive"),
@@ -64,7 +67,7 @@ struct KeyboardHelpView: View {
                         ("⌘ Z / ⌘ ⇧ Z", "Undo / Redo"),
                     ])
                     section("Reader", rows: [
-                        ("S", "Star / unstar"),
+                        ("⌘ ⇧ L", "Star / unstar"),
                     ])
                 }
                 .padding(.horizontal, 16)

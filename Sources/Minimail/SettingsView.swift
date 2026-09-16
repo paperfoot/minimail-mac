@@ -20,7 +20,29 @@ extension MinimailNotifier {
 
 struct SettingsView: View {
     @Environment(AppState.self) private var state
+    let initialSection: String?
+    private enum Section: String, CaseIterable {
+        case general = "General", accounts = "Accounts", signature = "Signature", outbox = "Outbox", advanced = "Advanced"
+    }
+    @State private var section: Section = .general
+    @State private var profiles: [MailProfile] = []
+    @State private var editingAccount: Account?
+    @State private var editingName = ""
+    @State private var editingProfile = ""
+    @State private var accountBusy = false
+    @State private var accountError: String?
+    @State private var removingAccount: Account?
+    @State private var showingNewProfile = false
+    @State private var newProfileName = ""
+    @State private var newProfileKey = ""
+    @State private var profileError: String?
+    @State private var removingProfile: String?
     @State private var signatureDraft: NSAttributedString = NSAttributedString()
+    @State private var showingSignatureEditor = false
+    @State private var signatureOriginal = ""
+    @State private var signatureError: String?
+    @State private var signatureLoading = false
+    @State private var confirmDiscardSignature = false
     @State private var signatureAccount: String?
     @State private var signatureSaving: Bool = false
     @State private var signatureSaved: Date?
@@ -37,6 +59,12 @@ struct SettingsView: View {
     @State private var outboxStatus: String?
     @State private var cliToolStatus: EmailCLI.CommandLineToolStatus?
     @State private var cliToolInstalling: Bool = false
+    @State private var showingAddAccount = false
+    @State private var addAccountEmail = ""
+    @State private var addAccountProfile = ""
+    @State private var addAccountAsDefault = false
+    @State private var addAccountSaving = false
+    @State private var addAccountError: ActionableError?
     @AppStorage(SettingsKey.syncIntervalSeconds) private var syncInterval: Int = 60
     @AppStorage(MetricsManager.enabledKey) private var diagnosticsEnabled: Bool = true
 
@@ -48,42 +76,84 @@ struct SettingsView: View {
         ("15 minutes", 900),
     ]
 
+    init(initialSection: String? = nil) {
+        self.initialSection = initialSection
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.25)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    accountsSection
-                    Divider().opacity(0.15)
-                    commandLineToolSection
-                    Divider().opacity(0.15)
-                    apiKeySection
-                    Divider().opacity(0.15)
-                    signatureSection
-                    Divider().opacity(0.15)
-                    syncSection
-                    Divider().opacity(0.15)
-                    launchAtLoginSection
-                    Divider().opacity(0.15)
-                    notificationsSection
-                    Divider().opacity(0.15)
-                    outboxSection
-                    Divider().opacity(0.15)
-                    diagnosticsSection
-                    Divider().opacity(0.15)
-                    aboutSection
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 14)
+            if let error = state.inbox.error {
+                ErrorBanner(error: error)
             }
+            Picker("Settings section", selection: $section) {
+                ForEach(Section.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(height: 24)
+            .padding(12)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    switch section {
+                    case .general:
+                        syncSection
+                        launchAtLoginSection
+                        notificationsSection
+                    case .accounts:
+                        accountsSection
+                        Divider()
+                        apiKeySection
+                    case .signature: signatureSection
+                    case .outbox: outboxSection
+                    case .advanced:
+                        commandLineToolSection
+                        diagnosticsSection
+                        aboutSection
+                    }
+                }
+                .frame(maxWidth: 680, alignment: .leading)
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .top)
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
+        .onChange(of: initialSection) { _, value in
+            if value == "outbox" { section = .outbox }
         }
         .onAppear {
+            if initialSection == "outbox" { section = .outbox }
             loadSignatureForCurrentAccount()
+            Task { await loadProfiles() }
             loadLaunchAtLoginState()
             loadAPIKeyProfile()
             Task { await refreshCommandLineToolStatus() }
             Task { await loadOutbox() }
+        }
+        .sheet(isPresented: $showingAddAccount) { addAccountSheet }
+        .sheet(item: $editingAccount) { account in accountEditor(account) }
+        .sheet(isPresented: $showingNewProfile) { newProfileSheet }
+        .sheet(isPresented: $showingSignatureEditor) { signatureEditor }
+        .confirmationDialog("Remove \(removingAccount?.email ?? "account") from this Mac?", isPresented: Binding(
+            get: { removingAccount != nil }, set: { if !$0 { removingAccount = nil } }
+        ), titleVisibility: .visible) {
+            Button("Remove Account and Local Mail", role: .destructive) {
+                if let account = removingAccount { Task { await removeAccount(account) } }
+            }
+            Button("Cancel", role: .cancel) { removingAccount = nil }
+        } message: {
+            Text("This removes its downloaded messages and saved drafts from Minimail. Mail on Resend stays unchanged. Accounts with unfinished deliveries must be resolved in Outbox first.")
+        }
+        .confirmationDialog("Remove profile \(removingProfile ?? "")?", isPresented: Binding(
+            get: { removingProfile != nil }, set: { if !$0 { removingProfile = nil } }
+        ), titleVisibility: .visible) {
+            Button("Remove Profile", role: .destructive) {
+                if let name = removingProfile { Task { await removeProfile(name) } }
+            }
+            Button("Cancel", role: .cancel) { removingProfile = nil }
+        } message: {
+            Text("Removes the saved API key from this Mac. The key is not revoked at Resend. Profiles used by an account cannot be removed.")
         }
     }
 
@@ -101,67 +171,254 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // ── Accounts ─────────────────────────────────────────────────────────
 
     private var accountsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionTitle("Accounts", subtitle: "Tap to set as default — outgoing mail uses this identity")
-            VStack(spacing: 4) {
-                ForEach(state.session.accounts) { acct in
-                    AccountSettingRow(
-                        account: acct,
-                        isDefault: acct.is_default == true,
-                        isCurrent: state.session.currentAccount?.email == acct.email
-                    ) {
-                        Task { await setDefault(acct) }
+            sectionTitle("Accounts", subtitle: "Manage sender identities and the default for All Accounts")
+            VStack(spacing: 8) {
+                ForEach(state.session.accounts) { account in
+                    HStack(spacing: 10) {
+                        AccountAvatar(email: account.email)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(account.display_name.flatMap { $0.isEmpty ? nil : $0 } ?? account.email)
+                                .font(.body.weight(.medium))
+                            Text(account.email + " · " + account.profile_name)
+                                .font(.caption).foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                        if account.is_default == true {
+                            Image(systemName: "star.fill").foregroundStyle(.yellow).help("Default sender")
+                        }
+                        Menu {
+                            Button("Edit Account…") {
+                                editingName = account.display_name ?? ""
+                                editingProfile = account.profile_name
+                                accountError = nil
+                                editingAccount = account
+                            }
+                            Button("Make Default Sender") { Task { await setDefault(account) } }
+                                .disabled(account.is_default == true)
+                            Divider()
+                            Button("Remove Account…", role: .destructive) { removingAccount = account }
+                        } label: { Image(systemName: "ellipsis.circle") }
+                        .menuStyle(.borderlessButton).fixedSize()
+                        .accessibilityLabel("Manage \(account.email)")
+                        .disabled(accountBusy)
                     }
+                    .padding(10)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
                 }
             }
-            // Command is copy-pastable — monospaced, tappable to copy
-            // to the clipboard. Onboarding sends the user here for
-            // add-account help, so this needs to be friendly and
-            // unambiguous about what to run. Once the full app ships an
-            // in-app add/remove flow the Terminal path can retire.
-            VStack(alignment: .leading, spacing: 4) {
-                Text("To add another account, run this in Terminal:")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                // Use the bundled email-cli path so the command works for
-                // every widget install — not just users who happen to have
-                // email-cli on PATH via Homebrew or cargo. The full bundled
-                // path is ugly but reliable. When the user's shell PATH
-                // already has email-cli, `email-cli account add …` also
-                // works — both commands are equivalent.
-                let bundledCLI = "/Applications/Minimail.app/Contents/MacOS/email-cli"
-                let profile = state.session.accounts.first?.profile_name ?? "default"
-                let addCommand = "\"\(bundledCLI)\" account add you@your-domain.com --profile \(profile)"
-                HStack(spacing: 6) {
-                    Text(addCommand)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 4)
-                    Button {
-                        let pb = NSPasteboard.general
-                        pb.clearContents()
-                        pb.setString(addCommand, forType: .string)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 10))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Copy command")
-                    .accessibilityLabel("Copy Terminal command to clipboard")
+            if let accountError { Text(accountError).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button {
+                    prepareAddAccount()
+                } label: {
+                    Label("Add Account", systemImage: "plus")
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                .disabled(availableProfiles.isEmpty || accountBusy)
+                .controlSize(.small)
             }
-            .padding(.top, 4)
         }
+    }
+
+    private var addAccountSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add Account")
+                .font(.headline)
+
+            Form {
+                TextField("Email address", text: $addAccountEmail)
+                    .textContentType(.emailAddress)
+                Picker("Profile", selection: $addAccountProfile) {
+                    ForEach(availableProfiles, id: \.self) { profile in
+                        Text(profile).tag(profile)
+                    }
+                }
+                Toggle("Make default for sending", isOn: $addAccountAsDefault)
+            }
+            .formStyle(.grouped)
+            .frame(height: 132)
+
+            if state.session.accounts.contains(where: { $0.email.caseInsensitiveCompare(addAccountEmail.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame }) {
+                Text("This account is already added. Use Edit Account to change it.").font(.caption).foregroundStyle(.secondary)
+            }
+            if let addAccountError {
+                Text(addAccountError.message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                if addAccountSaving {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    showingAddAccount = false
+                }
+                .disabled(addAccountSaving)
+                Button("Add") {
+                    Task { await addAccount() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canAddAccount || addAccountSaving)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+        .interactiveDismissDisabled(addAccountSaving)
+        .onChange(of: addAccountEmail) { _, _ in addAccountError = nil }
+        .onChange(of: addAccountProfile) { _, _ in addAccountError = nil }
+    }
+
+    private var canAddAccount: Bool {
+        let email = addAccountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return email.looksLikeEmail && availableProfiles.contains(addAccountProfile)
+            && !state.session.accounts.contains { $0.email.caseInsensitiveCompare(email) == .orderedSame }
+    }
+
+    private func prepareAddAccount() {
+        addAccountEmail = ""
+        addAccountProfile = state.session.currentAccount?.profile_name ?? availableProfiles.first ?? ""
+        addAccountAsDefault = false
+        addAccountError = nil
+        showingAddAccount = true
+    }
+
+    private func addAccount() async {
+        let email = addAccountEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard email.looksLikeEmail, availableProfiles.contains(addAccountProfile) else { return }
+        addAccountSaving = true
+        defer { addAccountSaving = false }
+        do {
+            try await state.addMailAccount(
+                email: email,
+                profile: addAccountProfile,
+                makeDefault: addAccountAsDefault
+            )
+            showingAddAccount = false
+        } catch {
+            addAccountError = ActionableError.classify(error)
+        }
+    }
+
+    private func loadProfiles() async {
+        do {
+            profiles = try await state.mailProfiles()
+            if !availableProfiles.contains(apiKeyProfile ?? "") {
+                apiKeyProfile = availableProfiles.first
+            }
+        } catch { state.inbox.error = ActionableError.classify(error) }
+    }
+
+    private func accountEditor(_ account: Account) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit Account").font(.headline)
+            Text(account.email).foregroundStyle(.secondary).textSelection(.enabled)
+            Form {
+                TextField("Sender name", text: $editingName)
+                Picker("Profile", selection: $editingProfile) {
+                    ForEach(availableProfiles, id: \.self) { Text($0).tag($0) }
+                }
+            }
+            .formStyle(.grouped)
+            .frame(height: 108)
+            Text("Your sender name appears in outgoing messages. Changing the profile verifies that its API key can send for this domain.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let accountError { Text(accountError).font(.caption).foregroundStyle(.red) }
+            HStack {
+                if accountBusy { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Cancel", role: .cancel) { editingAccount = nil }.disabled(accountBusy)
+                Button("Save") { Task { await saveAccount(account) } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(accountBusy || editingProfile.isEmpty)
+            }
+        }
+        .padding(20).frame(width: 380)
+        .interactiveDismissDisabled(accountBusy)
+    }
+
+    private func saveAccount(_ account: Account) async {
+        accountBusy = true
+        accountError = nil
+        defer { accountBusy = false }
+        do {
+            try await state.editMailAccount(email: account.email, name: editingName.trimmingCharacters(in: .whitespacesAndNewlines), profile: editingProfile)
+            editingAccount = nil
+        } catch { accountError = ActionableError.classify(error).message }
+    }
+
+    private func removeAccount(_ account: Account) async {
+        accountBusy = true
+        accountError = nil
+        defer { accountBusy = false; removingAccount = nil }
+        do {
+            try await state.removeMailAccount(account.email)
+            if signatureAccount == account.email { loadSignatureForCurrentAccount() }
+        } catch { accountError = ActionableError.classify(error).message }
+    }
+
+    private var newProfileSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add Profile").font(.headline)
+            Text("Connect a Resend workspace, then add its email addresses as accounts.")
+                .font(.callout).foregroundStyle(.secondary)
+            Form {
+                TextField("Profile name", text: $newProfileName)
+                SecureField("Resend API key", text: $newProfileKey)
+            }
+            .formStyle(.grouped).frame(height: 108)
+            if let profileError { Text(profileError).font(.caption).foregroundStyle(.red) }
+            HStack {
+                if apiKeySaving { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Cancel", role: .cancel) { newProfileKey = ""; showingNewProfile = false }
+                    .disabled(apiKeySaving)
+                Button("Test and Add") { Task { await createProfile() } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(apiKeySaving || newProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || newProfileKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20).frame(width: 380)
+        .interactiveDismissDisabled(apiKeySaving)
+    }
+
+    private func createProfile() async {
+        let name = newProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !availableProfiles.contains(name) else {
+            profileError = "This profile already exists. Select it in Accounts to replace its key."
+            return
+        }
+        apiKeySaving = true
+        profileError = nil
+        defer { apiKeySaving = false }
+        do {
+            try await state.saveMailProfile(name: name, apiKey: newProfileKey.trimmingCharacters(in: .whitespacesAndNewlines))
+            newProfileKey = ""
+            await loadProfiles()
+            apiKeyProfile = name
+            showingNewProfile = false
+        } catch { profileError = ActionableError.classify(error).message }
+    }
+
+    private func removeProfile(_ name: String) async {
+        apiKeySaving = true
+        defer { apiKeySaving = false; removingProfile = nil }
+        do {
+            try await state.removeMailProfile(name)
+            apiKeyDraft = ""
+            await loadProfiles()
+            apiKeyStatus = "Profile removed"
+        } catch { state.inbox.error = ActionableError.classify(error) }
     }
 
     // ── Command line tool ────────────────────────────────────────────────
@@ -226,14 +483,14 @@ struct SettingsView: View {
     }
 
     private func refreshCommandLineToolStatus() async {
-        cliToolStatus = await EmailCLI.shared.commandLineToolStatus()
+        cliToolStatus = await state.commandLineToolStatus()
     }
 
     private func installCommandLineTool() async {
         cliToolInstalling = true
         defer { cliToolInstalling = false }
         do {
-            cliToolStatus = try await EmailCLI.shared.installCommandLineTool()
+            cliToolStatus = try await state.installCommandLineTool()
         } catch {
             state.inbox.error = ActionableError.classify(error)
             await refreshCommandLineToolStatus()
@@ -242,9 +499,7 @@ struct SettingsView: View {
 
     private func setDefault(_ account: Account) async {
         do {
-            try await EmailCLI.shared.setDefaultAccount(account.email)
-            await state.refreshAccounts()
-            state.session.currentAccount = state.session.accounts.first { $0.email == account.email }
+            try await state.setDefaultMailAccount(account.email)
         } catch {
             state.inbox.error = ActionableError.classify(error)
         }
@@ -254,7 +509,7 @@ struct SettingsView: View {
 
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionTitle("Resend key", subtitle: "Repair or rotate the API key for a profile")
+            sectionTitle("Profiles", subtitle: "Each profile holds a Resend API key. New keys are tested before replacing a working key.")
             if availableProfiles.isEmpty {
                 Text("No profiles configured")
                     .font(.system(size: 11))
@@ -263,7 +518,7 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     Picker("", selection: Binding(
                         get: { apiKeyProfile ?? availableProfiles.first ?? "" },
-                        set: { apiKeyProfile = $0; apiKeyStatus = nil }
+                        set: { apiKeyProfile = $0; apiKeyStatus = nil; apiKeyDraft = "" }
                     )) {
                         ForEach(availableProfiles, id: \.self) { profile in
                             Text(profile).tag(profile)
@@ -271,6 +526,7 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .frame(width: 140)
+                    .disabled(apiKeySaving)
 
                     SecureField("re_…", text: $apiKeyDraft)
                         .textFieldStyle(.roundedBorder)
@@ -285,23 +541,37 @@ struct SettingsView: View {
                             .foregroundStyle(apiKeyStatus == "Saved" || apiKeyStatus == "Works" ? .green : .secondary)
                     }
                     Spacer()
-                    Button("Test") {
+                    Button("Test Saved Key") {
                         Task { await testAPIKeyProfile() }
                     }
                     .disabled(apiKeySaving)
                     .controlSize(.small)
-                    Button("Save") {
+                    Button("Test and Save") {
                         Task { await saveAPIKey() }
                     }
                     .disabled(apiKeySaving || apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .controlSize(.small)
                 }
             }
+            HStack {
+                Button("Add Profile…") {
+                    newProfileName = ""; newProfileKey = ""; profileError = nil
+                    showingNewProfile = true
+                }
+                Spacer()
+                if let profile = apiKeyProfile ?? availableProfiles.first {
+                    Button("Remove Profile…", role: .destructive) { removingProfile = profile }
+                        .disabled(state.session.accounts.contains { $0.profile_name == profile })
+                        .help("Remove attached accounts before removing their profile")
+                }
+            }
+            .controlSize(.small)
+            .disabled(apiKeySaving)
         }
     }
 
     private var availableProfiles: [String] {
-        Array(Set(state.session.accounts.map(\.profile_name))).sorted()
+        Array(Set(profiles.map(\.name) + state.session.accounts.map(\.profile_name))).sorted()
     }
 
     private func loadAPIKeyProfile() {
@@ -317,11 +587,9 @@ struct SettingsView: View {
         apiKeySaving = true
         defer { apiKeySaving = false }
         do {
-            try await EmailCLI.shared.addProfile(name: profile, apiKey: key)
-            try await EmailCLI.shared.testProfile(name: profile)
+            try await state.saveMailProfile(name: profile, apiKey: key)
             apiKeyDraft = ""
             apiKeyStatus = "Saved"
-            await state.refreshAccounts()
         } catch {
             apiKeyStatus = "Failed"
             state.inbox.error = ActionableError.classify(error)
@@ -333,7 +601,7 @@ struct SettingsView: View {
         apiKeySaving = true
         defer { apiKeySaving = false }
         do {
-            try await EmailCLI.shared.testProfile(name: profile)
+            try await state.testMailProfile(name: profile)
             apiKeyStatus = "Works"
         } catch {
             apiKeyStatus = "Failed"
@@ -351,7 +619,6 @@ struct SettingsView: View {
                 ForEach(state.session.accounts) { acct in
                     Button(acct.email) {
                         signatureAccount = acct.email
-                        Task { await loadSignature(for: acct.email) }
                     }
                 }
             } label: {
@@ -370,47 +637,83 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
 
+            Text(signatureDraft.string.isEmpty ? "No signature" : signatureDraft.string)
+                .font(.body).foregroundStyle(.secondary)
+                .lineLimit(8).textSelection(.enabled)
+                .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
+                .padding(12)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+            Text("Added automatically when sending, including saved drafts and replies.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                if signatureLoading { ProgressView().controlSize(.small) }
+                if signatureSaved != nil { Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
+                Spacer()
+                Button("Edit Signature…") {
+                    signatureOriginal = SignatureFormatting.storageString(from: signatureDraft)
+                    signatureError = nil
+                    showingSignatureEditor = true
+                }
+                .disabled(signatureAccount == nil || signatureLoading)
+            }
+        }
+        .task(id: signatureAccount) {
+            guard let signatureAccount else { return }
+            await loadSignature(for: signatureAccount)
+        }
+    }
+
+    private var signatureEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Edit Signature").font(.headline)
+            Text(signatureAccount ?? "").font(.callout).foregroundStyle(.secondary)
             VStack(spacing: 0) {
                 RichTextToolbar(textViewProvider: { signatureEditorHandle.textView })
-                Divider().opacity(0.12)
-                RichTextEditor(
-                    attributedText: $signatureDraft,
-                    handle: signatureEditorHandle
-                )
-                .frame(height: 84)
+                Divider()
+                RichTextEditor(attributedText: $signatureDraft, onEdit: { signatureSaved = nil }, handle: signatureEditorHandle)
+                    .frame(height: 160)
             }
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-
-            HStack(spacing: 8) {
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            if let signatureError { Text(signatureError).font(.caption).foregroundStyle(.red) }
+            HStack {
                 if signatureSaving { ProgressView().controlSize(.small) }
-                if let _ = signatureSaved {
-                    Label("Saved", systemImage: "checkmark.circle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.green)
-                }
                 Spacer()
-                Button("Save") {
-                    Task { await saveSignature() }
-                }
-                .disabled(signatureAccount == nil || signatureSaving)
-                .controlSize(.small)
+                Button("Cancel", role: .cancel) {
+                    if SignatureFormatting.storageString(from: signatureDraft) != signatureOriginal {
+                        confirmDiscardSignature = true
+                    } else { showingSignatureEditor = false }
+                }.disabled(signatureSaving)
+                Button("Save") { Task { await saveSignature() } }
+                    .keyboardShortcut(.defaultAction).disabled(signatureSaving)
             }
+        }
+        .padding(20).frame(width: 380)
+        .interactiveDismissDisabled()
+        .confirmationDialog("Discard signature changes?", isPresented: $confirmDiscardSignature, titleVisibility: .visible) {
+            Button("Discard Changes", role: .destructive) {
+                signatureDraft = SignatureFormatting.attributed(from: signatureOriginal)
+                showingSignatureEditor = false
+            }
+            Button("Keep Editing", role: .cancel) {}
         }
     }
 
     private func loadSignatureForCurrentAccount() {
         signatureAccount = state.session.currentAccount?.email
-        if let acct = signatureAccount {
-            Task { await loadSignature(for: acct) }
-        }
+            ?? state.session.accounts.first(where: { $0.is_default == true })?.email
+            ?? state.session.accounts.first?.email
     }
 
     private func loadSignature(for account: String) async {
+        signatureLoading = true
+        defer { if signatureAccount == account { signatureLoading = false } }
         do {
-            let stored = (try await EmailCLI.shared.signature(for: account)) ?? ""
+            let stored = (try await state.mailSignature(for: account)) ?? ""
+            guard signatureAccount == account else { return }
             signatureDraft = SignatureFormatting.attributed(from: stored)
             signatureSaved = nil
         } catch {
+            guard signatureAccount == account, !Task.isCancelled else { return }
             state.inbox.error = ActionableError.classify(error)
         }
     }
@@ -421,12 +724,14 @@ struct SettingsView: View {
         defer { signatureSaving = false }
         do {
             let stored = SignatureFormatting.storageString(from: signatureDraft)
-            try await EmailCLI.shared.setSignature(
+            try await state.setMailSignature(
                 stored,
                 isHTML: SignatureFormatting.isHTML(stored),
                 for: account
             )
+            guard signatureAccount == account else { return }
             signatureSaved = Date()
+            showingSignatureEditor = false
             Task {
                 try? await Task.sleep(for: .seconds(2))
                 if signatureSaved != nil, Date().timeIntervalSince(signatureSaved!) >= 1.9 {
@@ -435,7 +740,7 @@ struct SettingsView: View {
             }
             await state.refreshAccounts()
         } catch {
-            state.inbox.error = ActionableError.classify(error)
+            signatureError = ActionableError.classify(error).message
         }
     }
 
@@ -564,10 +869,10 @@ struct SettingsView: View {
                     Task { await loadOutbox() }
                 }
                 .controlSize(.small)
-                Button("Flush") {
+                Button("Send Pending") {
                     Task { await flushOutbox() }
                 }
-                .disabled(outboxLoading || outboxEntries.isEmpty)
+                .disabled(outboxLoading || !outboxEntries.contains(where: \.isPending))
                 .controlSize(.small)
             }
 
@@ -606,15 +911,16 @@ struct SettingsView: View {
                 }
             }
         }
+        .id("outbox")
     }
 
-    private func loadOutbox() async {
+    private func loadOutbox(clearStatus: Bool = true) async {
         outboxLoading = true
         defer { outboxLoading = false }
         do {
-            outboxEntries = try await EmailCLI.shared.outboxList()
+            outboxEntries = try await state.mailOutboxEntries()
                 .filter { $0.isFailed || $0.isPending }
-            outboxStatus = nil
+            if clearStatus { outboxStatus = nil }
         } catch {
             outboxStatus = "Could not load"
             state.inbox.error = ActionableError.classify(error)
@@ -625,9 +931,9 @@ struct SettingsView: View {
         outboxLoading = true
         defer { outboxLoading = false }
         do {
-            try await EmailCLI.shared.outboxRetry(id: entry.id)
-            outboxStatus = "Retried"
-            await loadOutbox()
+            try await state.retryMailOutboxEntry(id: entry.id)
+            await loadOutbox(clearStatus: false)
+            outboxStatus = "Retry started"
         } catch {
             outboxStatus = "Retry failed"
             state.inbox.error = ActionableError.classify(error)
@@ -638,11 +944,11 @@ struct SettingsView: View {
         outboxLoading = true
         defer { outboxLoading = false }
         do {
-            let result = try await EmailCLI.shared.outboxFlush()
+            let result = try await state.sendPendingMail()
+            await loadOutbox(clearStatus: false)
             outboxStatus = "Sent \(result.sent), failed \(result.failed)"
-            await loadOutbox()
         } catch {
-            outboxStatus = "Flush failed"
+            outboxStatus = "Send failed"
             state.inbox.error = ActionableError.classify(error)
         }
     }

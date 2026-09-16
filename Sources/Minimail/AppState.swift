@@ -41,6 +41,19 @@ final class InboxState {
     }
 
     var messages: [Message] = []
+    var inboxCursor: Int64?
+    var archiveCursor: Int64?
+    var snoozeCursor: Int64?
+    var isLoadingMore = false
+    var canLoadMore: Bool {
+        switch currentFolder {
+        case .drafts: false
+        case .archived: archiveCursor != nil
+        case .snoozed: snoozeCursor != nil
+        case .starred: inboxCursor != nil || archiveCursor != nil || snoozeCursor != nil
+        default: inboxCursor != nil
+        }
+    }
     var snoozedMessages: [Message] = []
     var drafts: [Draft] = []
     var currentFolder: Folder = .inbox
@@ -92,7 +105,7 @@ final class InboxState {
                 $0.isUnread && !$0.isArchived && !$0.isSnoozed
             }
         case .starred:
-            return messages.filter { $0.isStarred && !$0.isArchived }
+            return AppState.mergeMessages(messages + snoozedMessages).filter { $0.isStarred }
         case .snoozed:
             return snoozedMessages.filter { $0.isSnoozed }
         case .sent:
@@ -155,6 +168,7 @@ final class ReaderState {
 @MainActor
 @Observable
 final class ComposeState {
+    var generation = UUID()
     var to: String = ""
     var cc: String = ""
     var bcc: String = ""
@@ -210,6 +224,7 @@ final class ComposeState {
     }
     var usesRichText: Bool { bodyContainsFormatting }
     var attachments: [URL] = []
+    var isLoadingAttachments = false
     /// Per-compose "Send from" override. nil = use `AppState.composeFromAccount`
     /// (which falls back to default account or first account). Set when the
     /// user picks a different identity in the compose From-dropdown — does
@@ -229,8 +244,7 @@ final class ComposeState {
     var replyTo: String = ""
     /// Optional Resend `scheduled_at`. When set, the CLI passes this to
     /// Resend which holds the email server-side until the wake moment.
-    /// Cleared on send. Not persisted to drafts in v1 — the user picks a
-    /// schedule at send time.
+    /// Preserved in drafts and restored by Undo Send.
     var scheduledAt: Date?
 
     /// The backing draft row we're editing — created lazily on first autosave,
@@ -243,11 +257,13 @@ final class ComposeState {
     var isAutosaving: Bool = false
 
     func clear() {
+        generation = UUID()
         autosaveTask?.cancel()
         autosaveTask = nil
         to = ""; cc = ""; bcc = ""; subject = ""
         bodyAttributed = NSAttributedString()
         attachments = []
+        isLoadingAttachments = false
         fromOverride = nil
         replyToID = nil; forwardingID = nil; replyAll = false; error = nil
         replyTo = ""
@@ -261,6 +277,9 @@ final class ComposeState {
     /// clause the autosave scheduler short-circuits and the file is lost.
     var hasContent: Bool {
         !to.trimmingCharacters(in: .whitespaces).isEmpty
+        || !cc.trimmingCharacters(in: .whitespaces).isEmpty
+        || !bcc.trimmingCharacters(in: .whitespaces).isEmpty
+        || !replyTo.trimmingCharacters(in: .whitespaces).isEmpty
         || !subject.trimmingCharacters(in: .whitespaces).isEmpty
         || !body.trimmingCharacters(in: .whitespaces).isEmpty
         || !attachments.isEmpty
@@ -280,6 +299,8 @@ final class RouterState {
         case onboarding
     }
     var currentView: View = .inbox
+    var isExpanded = false
+    var settingsSection: String?
 }
 
 // ── Root app state ────────────────────────────────────────────────────────
@@ -314,10 +335,7 @@ enum TransientStatus: Equatable {
     /// Messages archived — user can undo within the 10s window. IDs let us
     /// restore them.
     case archived(ids: [Int64], deadline: Date)
-    /// Messages deleted — undo within window restores via the `trashed_ids`
-    /// remembered by the delete call (we fake the undo by re-inserting
-    /// nothing and relying on the user to re-sync; for now we just let the
-    /// user know it happened).
+    /// Permanent local deletion, with no undo claim.
     case deleted(count: Int)
     /// One-off confirmation banner for miscellaneous actions (star, snooze).
     case info(String)
@@ -349,6 +367,7 @@ final class AppState {
     /// running. At this point Undo is no longer truthful, so the UI switches
     /// from the undo toast to a progress-only sending toast.
     var deliveringSend: PendingSend?
+    private var deliveryWaiters: [CheckedContinuation<Void, Never>] = []
     /// Brief "Sent" flash after a queued send completes successfully.
     var transientStatus: TransientStatus?
     private var transientClearTask: Task<Void, Never>?
@@ -378,7 +397,7 @@ final class AppState {
         return f
     }()
 
-    /// Keyboard-help sheet visibility — `?` anywhere opens it.
+    /// Keyboard-help sheet visibility — ⌘/ opens it.
     var showKeyboardHelp: Bool = false
 
     /// True while the one-time "Open Minimail at login?" nudge is showing.
@@ -404,7 +423,13 @@ final class AppState {
     /// means a fast typist doesn't fan out one CLI process per keystroke.
     private var searchDebounceTask: Task<Void, Never>?
 
-    private let cli = EmailCLI.shared
+    let cli: EmailCLI
+    private var refreshGeneration = UUID()
+    private var searchGeneration = UUID()
+    private var activeAutosave: Task<Void, Never>?
+    private var isNavigating = false
+
+    init(cli: EmailCLI = .shared) { self.cli = cli }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -418,6 +443,9 @@ final class AppState {
         if session.accounts.isEmpty {
             router.currentView = .onboarding
             return
+        }
+        if router.currentView == .onboarding || router.currentView == .needsInstall {
+            router.currentView = .inbox
         }
         await refreshInbox(pull: false)
         // Prefetch drafts so the Drafts tab doesn't flash empty-state when tapped.
@@ -481,29 +509,44 @@ final class AppState {
         pendingLaunchAtLoginOffer = false
     }
 
-    /// Drain any send the previous session left mid-flight. Once `firePendingSend`
-    /// invokes the CLI, the Rust side writes a `pending` outbox row *before* the
-    /// network call; a crash/SIGKILL between that write and the status flip
-    /// leaves the row stuck in `pending` with nothing re-driving it until the
-    /// user manually opened Settings ▸ Outbox. Flushing on launch delivers
-    /// those automatically — the flush is idempotent (each row carries a
-    /// per-message Idempotency-Key that Resend dedups), so a row that actually
-    /// did reach Resend before the crash won't double-send. Best-effort: a
-    /// flush hiccup must never block startup.
+    /// Startup reports unfinished deliveries. Retry stays an explicit action
+    /// because a very old request may outlive the provider's deduplication window.
     private func reconcileOutboxOnLaunch() async {
-        if let flushed = try? await cli.outboxFlush(), flushed.sent > 0 {
-            flashStatus(.info("Delivered \(flushed.sent) queued message\(flushed.sent == 1 ? "" : "s")"))
-        }
-        // Surface anything that genuinely failed so the user has a path back.
-        // The Settings ▸ Outbox panel retries from the stored payload losslessly
-        // (attachments included), so we point there rather than rebuilding a
-        // lossy in-memory snapshot.
         if let entries = try? await cli.outboxList() {
-            let failed = entries.filter(\.isFailed).count
-            if failed > 0 {
-                flashStatus(.info("\(failed) message\(failed == 1 ? "" : "s") failed to send earlier — Settings ▸ Outbox to retry"))
+            let unfinished = entries.filter { $0.isFailed || $0.isPending }.count
+            if unfinished > 0 {
+                flashStatus(.info("\(unfinished) message\(unfinished == 1 ? "" : "s") need attention in Outbox"))
             }
         }
+    }
+
+    func pollForNewMail() async -> [Message] {
+        do {
+            try await cli.sync(account: nil)
+            await refreshInbox(pull: false)
+            inbox.lastPullAt = Date()
+            return try await cli.listInbox(account: nil, limit: 100).filter { $0.direction == "received" }
+        } catch {
+            inbox.error = ActionableError.classify(error)
+            return []
+        }
+    }
+
+    func replyFromNotification(id: Int64, text: String) async {
+        guard await prepareToLeaveCompose() else { return }
+        do {
+            let message = try await cli.readMessage(id: id, markRead: false)
+            startCompose(replyTo: message)
+            if !text.isEmpty { compose.body = text + "\n\n" + compose.body }
+            scheduleAutosave()
+        } catch { inbox.error = ActionableError.classify(error) }
+    }
+
+    func markRead(ids: [Int64]) async {
+        do {
+            try await cli.markRead(ids: ids)
+            for id in ids { markMessageReadLocally(id: id) }
+        } catch { inbox.error = ActionableError.classify(error) }
     }
 
     // ── Reader navigation within the list ─────────────────────────────────
@@ -555,12 +598,15 @@ final class AppState {
     /// Stores either the email of the current account or the literal "all".
     private static let preferredAccountKey = "minimail.preferredAccount"
     private static let unifiedSentinel = "__all__"
+    private var restoredAccountSelection = false
 
     func refreshAccounts() async {
         do {
             let loaded = try await cli.listAccounts()
             session.accounts = loaded
-            if session.currentAccount == nil {
+            if let current = session.currentAccount {
+                session.currentAccount = loaded.first { $0.email == current.email }
+            } else if !restoredAccountSelection {
                 // Restore the user's last choice from UserDefaults. Falls
                 // back to the default account on first launch.
                 let saved = UserDefaults.standard.string(forKey: Self.preferredAccountKey)
@@ -572,6 +618,7 @@ final class AppState {
                     session.currentAccount = loaded.first(where: { $0.is_default == true }) ?? loaded.first
                 }
             }
+            restoredAccountSelection = true
         } catch {
             inbox.error = ActionableError.classify(error)
         }
@@ -579,7 +626,7 @@ final class AppState {
 
     /// Persist the user's account-view preference so a relaunch returns
     /// to the same view (unified vs a specific account).
-    private func persistPreferredAccount() {
+    func persistPreferredAccount() {
         let value = session.currentAccount?.email ?? Self.unifiedSentinel
         UserDefaults.standard.set(value, forKey: Self.preferredAccountKey)
     }
@@ -587,137 +634,117 @@ final class AppState {
     /// `pull: true` hits Resend first for new mail, then re-reads the local DB.
     /// `pull: false` is a local-only re-render (after mark-read, archive, send).
     func refreshInbox(pull: Bool = true) async {
-        guard !session.accounts.isEmpty else { return }
-        guard inbox.syncState != .syncing else { return }
+        guard !session.accounts.isEmpty else {
+            refreshGeneration = UUID()
+            inbox.messages = []; inbox.snoozedMessages = []; inbox.drafts = []
+            inbox.searchResults = []; inbox.selection = []; inbox.totalUnread = 0
+            inbox.inboxCursor = nil; inbox.archiveCursor = nil; inbox.snoozeCursor = nil
+            inbox.syncState = .idle
+            return
+        }
+        let generation = UUID()
+        refreshGeneration = generation
+        let account = session.currentAccount?.email
         inbox.syncState = .syncing
         defer {
-            if case .syncing = inbox.syncState {
-                inbox.syncState = .idle
-            }
+            if refreshGeneration == generation, inbox.syncState == .syncing { inbox.syncState = .idle }
         }
-
         do {
-            let email = session.currentAccount?.email
-            if pull {
-                try await cli.sync(account: email)
-                inbox.lastPullAt = Date()
-            }
-            async let listA = cli.listInbox(account: email, archived: false, limit: 100)
-            async let listB = cli.listInbox(account: email, archived: true, limit: 100)
-            async let snoozedList = cli.listInbox(account: email, snoozed: true, limit: 100)
+            if pull { try await cli.sync(account: account) }
+            // Keep the already-loaded depth when actions or background checks refresh.
+            let limit = max(100, inbox.messages.filter { !$0.isArchived }.count)
+            let archiveLimit = max(100, inbox.messages.filter(\.isArchived).count)
+            async let listA = cli.listInboxPage(account: account, limit: limit)
+            async let listB = cli.listInboxPage(account: account, archived: true, limit: archiveLimit)
+            async let snoozedList = cli.listInboxPage(account: account, snoozed: true, limit: max(100, inbox.snoozedMessages.count))
+            async let statsResult = cli.stats(account: account)
             let (a, b, c) = try await (listA, listB, snoozedList)
-            var seen = Set<Int64>()
-            inbox.messages = (a + b).filter { seen.insert($0.id).inserted }
-            inbox.snoozedMessages = c
-            let stats = try? await cli.stats(account: email)
+            let stats = try? await statsResult
+            guard refreshGeneration == generation, session.currentAccount?.email == account else { return }
+            inbox.messages = Self.mergeMessages((a.messages ?? []) + (b.messages ?? []))
+            inbox.snoozedMessages = c.messages ?? []
+            inbox.inboxCursor = a.has_more == true ? a.next_cursor : nil
+            inbox.archiveCursor = b.has_more == true ? b.next_cursor : nil
+            inbox.snoozeCursor = c.has_more == true ? c.next_cursor : nil
             inbox.totalUnread = stats?.unread ?? inbox.messages.filter(\.isUnread).count
+            if pull { inbox.lastPullAt = Date() }
             inbox.error = nil
             rebuildContactIndex()
-            // Eager attachment cache — Resend's signed URLs expire (seen as
-            // CloudFront 403s at click time) and sometimes arrive as null in
-            // the webhook. Prefetch keeps the bytes on disk so attachments
-            // stay openable regardless. Fire-and-forget; the user doesn't
-            // need to wait for it.
+            if !inbox.searchQuery.isEmpty { scheduleSearch() }
             if pull {
-                Task { [weak self, account = email] in
-                    try? await self?.cli.prefetchAttachments(account: account)
-                }
+                Task { [weak self] in try? await self?.cli.prefetchAttachments(account: account) }
             }
         } catch {
+            guard refreshGeneration == generation else { return }
             let actionable = ActionableError.classify(error)
             inbox.error = actionable
             inbox.syncState = .error(actionable.message)
         }
     }
 
-    // ── Selection / navigation ────────────────────────────────────────────
-
-    /// Static regex for tracking-pixel counting — was compiled inside the
-    /// reader's footer on every render. Matches `<img ... src="http://">`
-    /// or `https://` which is what our WKContentRuleList blocks.
-    private static let trackingRegex = try! NSRegularExpression(
-        pattern: "<img[^>]+src=\"https?://",
-        options: [.caseInsensitive]
-    )
-
-    func open(message: Message) {
-        // Seed immediately with the cached list-row version so the reader
-        // has a body to render before the full-detail fetch returns. All of
-        // these writes are synchronous so SwiftUI coalesces them into a
-        // single re-render (per Donny Wals: body re-evaluations in the same
-        // render loop collapse to one redraw).
-        reader.loaded = message
-        if reader.error != nil { reader.error = nil }   // guard no-op write
-        router.currentView = .reader(message.id)
-        updateReaderDerived(for: message)
-        loadFullMessage(id: message.id)
-
-        // Mark-read path: mutate the message in-place instead of re-fetching
-        // the whole inbox via refreshInbox. The old refresh ran listInbox x3
-        // + rebuildContactIndex DURING the spring transition — ~25ms of
-        // unrelated work that starved the animation. In-place flip is O(1).
-        if message.isUnread {
-            Task { [weak self, id = message.id] in
-                try? await self?.cli.markRead(ids: [id])
-                guard let self else { return }
-                if let idx = self.inbox.messages.firstIndex(where: { $0.id == id }) {
-                    self.inbox.messages[idx].is_read = true
-                }
-                self.inbox.totalUnread = max(0, self.inbox.totalUnread - 1)
-            }
+    static func mergeMessages(_ messages: [Message]) -> [Message] {
+        var seen = Set<Int64>()
+        return messages.filter { seen.insert($0.id).inserted }.sorted {
+            let lhs = Dates.parse($0.created_at) ?? .distantPast
+            let rhs = Dates.parse($1.created_at) ?? .distantPast
+            return lhs == rhs ? $0.id > $1.id : lhs > rhs
         }
     }
 
-    /// Open a message by id — used by notification click-through. Prefers the
-    /// in-memory list row (synchronous, avoids a round-trip for common case)
-    /// but falls through to a raw reader-route + lazy body fetch when the
-    /// message isn't currently loaded. The second branch used to just flip
-    /// the route and leave `reader.loaded == nil`, producing a blank reader
-    /// shell until the user navigated back and forward. Now it seeds reader
-    /// state correctly, triggers `loadFullMessage` to pull the body, and
-    /// mirrors the in-place mark-read mutation from `open(message:)` (commit
-    /// 69585db) so the unread badge updates without a full refresh.
+    func loadMoreMessages() async {
+        guard !inbox.isLoadingMore else { return }
+        inbox.isLoadingMore = true
+        defer { inbox.isLoadingMore = false }
+        let generation = refreshGeneration
+        let account = session.currentAccount?.email
+        let folder = inbox.currentFolder
+        do {
+            for kind in 0...2 {
+                if folder == .archived && kind != 1 { continue }
+                if folder == .snoozed && kind != 2 { continue }
+                if folder != .archived && folder != .snoozed && folder != .starred && kind != 0 { continue }
+                let cursor = kind == 0 ? inbox.inboxCursor : (kind == 1 ? inbox.archiveCursor : inbox.snoozeCursor)
+                guard let cursor else { continue }
+                let page = try await cli.listInboxPage(account: account, archived: kind == 1, snoozed: kind == 2, limit: 100, after: cursor)
+                guard refreshGeneration == generation, session.currentAccount?.email == account else { return }
+                let next = page.has_more == true ? page.next_cursor : nil
+                if kind == 2 {
+                    inbox.snoozedMessages = Self.mergeMessages(inbox.snoozedMessages + (page.messages ?? []))
+                    inbox.snoozeCursor = next
+                } else {
+                    inbox.messages = Self.mergeMessages(inbox.messages + (page.messages ?? []))
+                    if kind == 0 { inbox.inboxCursor = next } else { inbox.archiveCursor = next }
+                }
+            }
+        } catch { inbox.error = ActionableError.classify(error) }
+    }
+
+    func open(message: Message) {
+        if router.isExpanded { inbox.selection = [message.id] }
+        reader.loaded = message
+        reader.error = nil
+        router.currentView = .reader(message.id)
+        updateReaderDerived(for: message)
+        loadFullMessage(id: message.id)
+        if message.isUnread { Task { await markRead(message: message) } }
+    }
+
     func openMessage(id: Int64) {
-        if let msg = inbox.messages.first(where: { $0.id == id }) {
-            open(message: msg)
+        if let message = inbox.messages.first(where: { $0.id == id }) {
+            open(message: message)
             return
         }
         reader.loaded = nil
-        if reader.error != nil { reader.error = nil }
+        reader.error = nil
         router.currentView = .reader(id)
         loadFullMessage(id: id)
-        // Mark read. The message may or may not be in our currently-loaded
-        // inbox slice (e.g. notification click for a different account or a
-        // message older than our 100-row pull window). Only flip the local
-        // `is_read` + decrement the badge when we actually observe the
-        // previously-unread state in-memory. For the out-of-view case, ask
-        // the CLI for fresh stats instead of blindly decrementing — the old
-        // "always --" path undercounted the badge on cross-account
-        // notifications.
-        Task { [weak self, id] in
-            try? await self?.cli.markRead(ids: [id])
-            guard let self else { return }
-            if let idx = self.inbox.messages.firstIndex(where: { $0.id == id }) {
-                let wasUnread = self.inbox.messages[idx].isUnread
-                self.inbox.messages[idx].is_read = true
-                if wasUnread {
-                    self.inbox.totalUnread = max(0, self.inbox.totalUnread - 1)
-                }
-                return
-            }
-            // Message not in current view — reconcile via stats for the
-            // currently-displayed account (nil = unified).
-            let account = self.session.currentAccount?.email
-            if let stats = try? await self.cli.stats(account: account),
-               let unread = stats.unread {
-                self.inbox.totalUnread = unread
-            }
-        }
     }
 
     /// Refresh cached reader-footer values when navigating to a message.
     /// Called once per `open()` — avoids per-render `inbox.visible()` filter
     /// and per-render `NSRegularExpression` compile in the footer.
+    private static let trackingRegex = try! NSRegularExpression(pattern: #"(?i)(?:src|href|srcset)\s*=\s*["']?(?:https?:)?//"#)
+
     private func updateReaderDerived(for message: Message) {
         let list = inbox.visible()
         if let idx = list.firstIndex(where: { $0.id == message.id }) {
@@ -755,6 +782,7 @@ final class AppState {
                 let detail = try await self.cli.readMessage(id: id, markRead: false)
                 if Task.isCancelled { return }
                 self.reader.loaded = detail
+                if detail.isUnread { Task { await self.markRead(message: detail) } }
                 if self.reader.error != nil { self.reader.error = nil }
                 self.reader.isLoading = false
                 self.updateReaderDerived(for: detail)
@@ -821,18 +849,19 @@ final class AppState {
     /// Load the full body for a thread sibling (user tapped a collapsed row).
     func expandThreadMessage(_ id: Int64) async {
         guard !reader.expandedThreadIDs.contains(id) else { return }
+        let route = router.currentView
         reader.expandedThreadIDs.insert(id)
-        // If the summary version is already in `thread`, just fetch the body
-        // and splice it in so the view updates.
-        guard let idx = reader.thread.firstIndex(where: { $0.id == id }) else { return }
-        let wasUnread = reader.thread[idx].isUnread
-        if let full = try? await cli.readMessage(id: id, markRead: true) {
-            reader.thread[idx] = full
+        do {
+            let full = try await cli.readMessage(id: id, markRead: false)
+            guard router.currentView == route, let index = reader.thread.firstIndex(where: { $0.id == id }) else { return }
+            reader.thread[index] = full
             reader.loaded = full
             updateReaderDerived(for: full)
-            if wasUnread {
-                markMessageReadLocally(id: id)
-            }
+            if full.isUnread { await markRead(message: full) }
+        } catch {
+            guard router.currentView == route else { return }
+            reader.expandedThreadIDs.remove(id)
+            inbox.error = ActionableError.classify(error)
         }
     }
 
@@ -843,6 +872,8 @@ final class AppState {
     }
 
     private func markMessageReadLocally(id: Int64) {
+        if reader.loaded?.id == id { reader.loaded?.is_read = true }
+        if let index = inbox.searchResults.firstIndex(where: { $0.id == id }) { inbox.searchResults[index].is_read = true }
         if let idx = inbox.messages.firstIndex(where: { $0.id == id }) {
             let wasUnread = inbox.messages[idx].isUnread
             inbox.messages[idx].is_read = true
@@ -874,6 +905,11 @@ final class AppState {
     /// unarchive within the next 10s. Reusable for single-row archive (from
     /// reader) and bulk archive (from the selection bar).
     func archive(ids: [Int64], navigateBack: Bool = false) async {
+        // Search and Starred may mix archived and unarchived messages. Undo
+        // must only restore messages this action actually moved.
+        let known = inbox.messages + inbox.snoozedMessages + inbox.searchResults + reader.thread
+        let archivedIDs = Set(known.filter(\.isArchived).map(\.id))
+        let ids = ids.filter { !archivedIDs.contains($0) }
         guard !ids.isEmpty else { return }
         do {
             try await cli.archive(ids: ids)
@@ -913,10 +949,19 @@ final class AppState {
             } else {
                 try await cli.star(ids: [message.id])
             }
+            mutateMessage(message.id) { $0.starred = !message.isStarred }
             await refreshInbox(pull: false)
         } catch {
             inbox.error = ActionableError.classify(error)
         }
+    }
+
+    private func mutateMessage(_ id: Int64, change: (inout Message) -> Void) {
+        if reader.loaded?.id == id, var message = reader.loaded { change(&message); reader.loaded = message }
+        if let i = reader.thread.firstIndex(where: { $0.id == id }) { change(&reader.thread[i]) }
+        if let i = inbox.messages.firstIndex(where: { $0.id == id }) { change(&inbox.messages[i]) }
+        if let i = inbox.snoozedMessages.firstIndex(where: { $0.id == id }) { change(&inbox.snoozedMessages[i]) }
+        if let i = inbox.searchResults.firstIndex(where: { $0.id == id }) { change(&inbox.searchResults[i]) }
     }
 
     func snooze(_ message: Message, until: String) async {
@@ -966,7 +1011,27 @@ final class AppState {
 
     func bulkArchive() async {
         let ids = Array(inbox.selection)
+        guard !ids.isEmpty else { return }
+        if inbox.currentFolder == .archived {
+            do {
+                try await cli.unarchive(ids: ids)
+                inbox.clearSelection()
+                await refreshInbox(pull: false)
+                flashStatus(.info("Moved to Inbox"))
+            } catch { inbox.error = ActionableError.classify(error) }
+            return
+        }
         await archive(ids: ids)
+    }
+
+    func bulkMarkUnread() async {
+        let ids = Array(inbox.selection)
+        guard !ids.isEmpty else { return }
+        do {
+            try await cli.markUnread(ids: ids)
+            inbox.clearSelection()
+            await refreshInbox(pull: false)
+        } catch { inbox.error = ActionableError.classify(error) }
     }
 
     func bulkMarkRead() async {
@@ -982,16 +1047,7 @@ final class AppState {
     }
 
     func bulkDelete() async {
-        let ids = Array(inbox.selection)
-        guard !ids.isEmpty else { return }
-        do {
-            try await cli.delete(ids: ids)
-            inbox.clearSelection()
-            await refreshInbox(pull: false)
-            flashStatus(.deleted(count: ids.count))
-        } catch {
-            inbox.error = ActionableError.classify(error)
-        }
+        await deleteMessages(ids: Array(inbox.selection))
     }
 
     // ── Account quick-switcher ────────────────────────────────────────────
@@ -1000,20 +1056,85 @@ final class AppState {
     /// No-op if there's no account at that index.
     func selectAccount(at index: Int) async {
         guard index >= 1, index <= session.accounts.count else { return }
-        let acct = session.accounts[index - 1]
-        session.currentAccount = acct
-        persistPreferredAccount()
-        await refreshInbox(pull: false)
+        await switchAccount(session.accounts[index - 1])
     }
 
-    /// Switch to unified "All Accounts" mode. `currentAccount = nil` is the
-    /// sentinel; `refreshInbox` then queries the CLI without an --account
-    /// filter so messages from every mailbox stream into one list. Compose
-    /// falls back to the default account (see `composeFromAccount`).
-    func selectUnifiedInbox() async {
-        session.currentAccount = nil
+    func selectUnifiedInbox() async { await switchAccount(nil) }
+
+    private func switchAccount(_ account: Account?) async {
+        guard await prepareToLeaveCompose() else { return }
+        session.currentAccount = account
         persistPreferredAccount()
+        reader.inflight?.cancel()
+        reader.loaded = nil
+        inbox.messages = []
+        inbox.snoozedMessages = []
+        inbox.drafts = []
+        inbox.selection = []
+        inbox.searchResults = []
+        inbox.searchError = nil
+        inbox.totalUnread = 0
+        searchDebounceTask?.cancel()
+        searchGeneration = UUID()
+        router.currentView = .inbox
         await refreshInbox(pull: false)
+        await refreshDrafts()
+    }
+
+    func selectFolder(_ folder: InboxState.Folder) async {
+        guard await prepareToLeaveCompose() else { return }
+        inbox.currentFolder = folder
+        inbox.searchQuery = ""
+        scheduleSearch()
+        inbox.focusedRowIndex = -1
+        inbox.clearSelection()
+        back()
+        if folder == .drafts { await refreshDrafts() }
+    }
+
+    @discardableResult
+    func prepareToLeaveCompose() async -> Bool {
+        guard case .compose = router.currentView else { return true }
+        guard !compose.isSending else { return false }
+        guard !compose.isLoadingAttachments else {
+            compose.error = "Wait for the original attachments to finish downloading."
+            return false
+        }
+        NotificationCenter.default.post(name: .minimailCommitRecipients, object: nil)
+        await flushAutosave()
+        return compose.error == nil
+    }
+
+    func navigate(to destination: RouterState.View) async {
+        guard await prepareToLeaveCompose() else { return }
+        router.settingsSection = nil
+        router.currentView = destination
+    }
+
+    func openOutbox() async {
+        guard await prepareToLeaveCompose() else { return }
+        router.settingsSection = "outbox"
+        router.currentView = .settings
+    }
+
+    func saveComposeAndStartNew() async {
+        guard !isNavigating else { return }
+        isNavigating = true
+        defer { isNavigating = false }
+        guard await prepareToLeaveCompose() else { return }
+        startCompose()
+    }
+
+    func composeReply(to message: Message, replyAll: Bool = false, forward: Bool = false) async {
+        guard !isNavigating else { return }
+        isNavigating = true
+        defer { isNavigating = false }
+        guard await prepareToLeaveCompose() else { return }
+        do {
+            let full = try await cli.readMessage(id: message.id, markRead: false)
+            if forward { startForward(of: full) }
+            else { startCompose(replyTo: full, replyAll: replyAll) }
+        } catch { inbox.error = ActionableError.classify(error) }
     }
 
     // ── Search ────────────────────────────────────────────────────────────
@@ -1026,6 +1147,7 @@ final class AppState {
     /// filtered list via `InboxState.visible()`.
     func scheduleSearch() {
         searchDebounceTask?.cancel()
+        searchGeneration = UUID()
         let trimmed = inbox.searchQuery.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty {
             // Clear-query path — reset search state so visible() routes back
@@ -1035,6 +1157,8 @@ final class AppState {
             inbox.searchResults = []
             return
         }
+        inbox.isSearching = true
+        inbox.searchResults = []
         searchDebounceTask = Task { [weak self] in
             // 300ms debounce is short enough that typists barely notice,
             // long enough that the CLI isn't hammered mid-word.
@@ -1055,25 +1179,28 @@ final class AppState {
             inbox.searchError = nil
             return
         }
+        let generation = searchGeneration
+        let account = session.currentAccount?.email
         inbox.isSearching = true
         inbox.searchError = nil
-        defer { inbox.isSearching = false }
+        defer { if searchGeneration == generation { inbox.isSearching = false } }
         do {
             let hits = try await cli.search(
                 query: query,
-                account: session.currentAccount?.email,
-                limit: 100
+                account: account,
+                limit: 500
             )
             if Task.isCancelled { return }
             // Only commit results if the query we searched for is still the
             // user's current query — guards against a slow search run
             // finishing after the user has already moved on or cleared the
             // box. Without this you'd see stale hits flash in after clear.
-            if inbox.searchQuery.trimmingCharacters(in: .whitespaces) == query {
+            if searchGeneration == generation, session.currentAccount?.email == account,
+               inbox.searchQuery.trimmingCharacters(in: .whitespaces) == query {
                 inbox.searchResults = hits
             }
         } catch {
-            if Task.isCancelled { return }
+            if Task.isCancelled || searchGeneration != generation { return }
             inbox.searchError = ActionableError.classify(error)
             inbox.searchResults = []
         }
@@ -1089,10 +1216,25 @@ final class AppState {
     }
 
     func markAllRead() async {
-        let ids = inbox.messages.filter(\.isUnread).map(\.id)
-        guard !ids.isEmpty else { return }
+        let account = session.currentAccount?.email
         do {
-            try await cli.markRead(ids: ids)
+            // Traverse the mailbox, not just the pages currently visible.
+            for archived in [false, true] {
+                for snoozed in [false, true] {
+                    var cursor: Int64?
+                    repeat {
+                        let page = try await cli.listInboxPage(
+                            account: account, archived: archived, snoozed: snoozed,
+                            limit: 100, after: cursor
+                        )
+                        let ids = (page.messages ?? []).filter(\.isUnread).map(\.id)
+                        if !ids.isEmpty { try await cli.markRead(ids: ids) }
+                        let next = page.has_more == true ? page.next_cursor : nil
+                        guard next != cursor || next == nil else { break }
+                        cursor = next
+                    } while cursor != nil
+                }
+            }
             await refreshInbox(pull: false)
         } catch {
             inbox.error = ActionableError.classify(error)
@@ -1102,6 +1244,7 @@ final class AppState {
     func markUnread(message: Message) async {
         do {
             try await cli.markUnread(ids: [message.id])
+            mutateMessage(message.id) { $0.is_read = false }
             await refreshInbox(pull: false)
         } catch {
             inbox.error = ActionableError.classify(error)
@@ -1114,7 +1257,7 @@ final class AppState {
     func markRead(message: Message) async {
         do {
             try await cli.markRead(ids: [message.id])
-            await refreshInbox(pull: false)
+            markMessageReadLocally(id: message.id)
         } catch {
             inbox.error = ActionableError.classify(error)
         }
@@ -1123,18 +1266,25 @@ final class AppState {
     func unarchive(message: Message) async {
         do {
             try await cli.unarchive(ids: [message.id])
+            mutateMessage(message.id) { $0.archived = false }
             await refreshInbox(pull: false)
         } catch {
             inbox.error = ActionableError.classify(error)
         }
     }
 
-    func delete(message: Message) async {
+    func delete(message: Message) async { await deleteMessages(ids: [message.id]) }
+
+    func deleteMessages(ids: [Int64]) async {
         do {
-            try await cli.delete(ids: [message.id])
-            router.currentView = .inbox
-            reader.loaded = nil
+            try await cli.delete(ids: ids)
+            if let current = reader.loaded, ids.contains(current.id) {
+                router.currentView = .inbox
+                reader.loaded = nil
+            }
+            inbox.selection.subtract(ids)
             await refreshInbox(pull: false)
+            flashStatus(.deleted(count: ids.count))
         } catch {
             inbox.error = ActionableError.classify(error)
         }
@@ -1159,11 +1309,48 @@ final class AppState {
     // ── Drafts ───────────────────────────────────────────────────────────
 
     func refreshDrafts() async {
+        let account = session.currentAccount?.email
         do {
-            inbox.drafts = try await cli.listDrafts(account: session.currentAccount?.email)
+            let drafts = try await cli.listDrafts(account: account)
+            guard session.currentAccount?.email == account else { return }
+            inbox.drafts = drafts
         } catch {
             inbox.error = ActionableError.classify(error)
         }
+    }
+
+    func openDraft(_ draft: Draft) async {
+        if pendingSend?.originalDraftID == draft.id {
+            await restorePendingSend()
+            return
+        }
+        guard deliveringSend?.originalDraftID != draft.id else {
+            flashStatus(.info("This draft is being sent"))
+            return
+        }
+        guard await prepareToLeaveCompose() else { return }
+        // The sidebar can still contain the version from before autosave.
+        if compose.editingDraftID == draft.id {
+            router.currentView = .compose(compose.replyToID)
+            return
+        }
+        edit(draft: draft)
+    }
+
+    func deleteDraft(_ draft: Draft) async {
+        guard pendingSend?.originalDraftID != draft.id,
+              deliveringSend?.originalDraftID != draft.id else {
+            flashStatus(.info("Undo the send before discarding this draft"))
+            return
+        }
+        if compose.editingDraftID == draft.id {
+            await discardDraft()
+            return
+        }
+        do {
+            try await cli.deleteDraft(id: draft.id)
+            await refreshDrafts()
+        } catch { inbox.error = ActionableError.classify(error) }
     }
 
     func edit(draft: Draft) {
@@ -1172,6 +1359,8 @@ final class AppState {
         compose.to = (draft.to ?? []).joined(separator: ", ")
         compose.cc = (draft.cc ?? []).joined(separator: ", ")
         compose.bcc = (draft.bcc ?? []).joined(separator: ", ")
+        compose.replyTo = (draft.reply_to ?? []).joined(separator: ", ")
+        compose.scheduledAt = Dates.parse(draft.scheduled_at)
         compose.subject = draft.subject ?? ""
         // Prefer HTML body if the draft has one so rich-text formatting
         // survives a save-and-reopen round-trip. Falls back to plain text.
@@ -1199,15 +1388,10 @@ final class AppState {
         if let account = draft.account_email {
             compose.fromOverride = session.accounts.first { $0.email == account }
         }
-        // Rehydrate attachments from the snapshot paths the Rust backend
-        // persisted. Files may have moved/been deleted since the draft was
-        // saved — skip missing ones silently rather than surface a noisy
-        // error, since the draft body is still salvageable.
+        // Keep missing attachments visible. Saving and sending explain how
+        // to repair them instead of silently dropping a promised file.
         if let paths = draft.attachment_paths, !paths.isEmpty {
-            let fm = FileManager.default
-            compose.attachments = paths
-                .map { URL(fileURLWithPath: $0) }
-                .filter { fm.fileExists(atPath: $0.path) }
+            compose.attachments = paths.map { URL(fileURLWithPath: $0) }
         }
         router.currentView = .compose(nil)
     }
@@ -1221,8 +1405,20 @@ final class AppState {
         compose.autosaveTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.5))
             if Task.isCancelled { return }
-            await self?.performAutosave()
+            guard let self else { return }
+            // The debounce owns only its delay. A database write must finish
+            // even when another keystroke starts the next debounce.
+            self.compose.autosaveTask = nil
+            await self.saveLatestDraft()
         }
+    }
+
+    private func saveLatestDraft() async {
+        while let active = activeAutosave { await active.value; await Task.yield() }
+        let task = Task { await self.performAutosave() }
+        activeAutosave = task
+        await task.value
+        activeAutosave = nil
     }
 
     private func performAutosave() async {
@@ -1231,6 +1427,7 @@ final class AppState {
         // createDraft with concurrent tasks (each picks up editingDraftID=nil).
         guard !compose.isAutosaving, (compose.hasContent || compose.editingDraftID != nil) else { return }
         compose.isAutosaving = true
+        let generation = compose.generation
         defer { compose.isAutosaving = false }
 
         let toList = splitAddresses(compose.to)
@@ -1239,20 +1436,16 @@ final class AppState {
         let subject = compose.subject
         let body = compose.body
         let html = compose.bodyHTML
-        // Filter out attachments whose files have disappeared since the user
-        // added them (moved to trash, ejected volume, etc.). Rust's snapshot
-        // step opens every path and errors on the first miss, which would
-        // abort the whole autosave and leave the user with no draft AND no
-        // visible error. Drop the missing ones quietly for the CLI call but
-        // keep them in compose.attachments for the UI so the user sees the
-        // chip and can remove it. Surface a transient status if any dropped.
+        // A missing attachment requires a visible repair action. Never
+        // silently save or send a reduced attachment list.
         let allAttachments = compose.attachments
         let existingAttachments = allAttachments.filter {
             FileManager.default.fileExists(atPath: $0.path)
         }
         let droppedCount = allAttachments.count - existingAttachments.count
         if droppedCount > 0 {
-            flashStatus(.info("\(droppedCount) attachment file\(droppedCount == 1 ? "" : "s") no longer on disk — not saved"))
+            compose.error = "An attachment is missing. Remove it or attach it again to save this draft."
+            return
         }
 
         // Resolve the draft's owning account in the same priority order as
@@ -1273,22 +1466,34 @@ final class AppState {
                 // across reopen. Before this, editDraft ignored the account
                 // and the Rust UPDATE didn't touch account_email — user
                 // picks a new From, closes, reopens → sees original.
-                try await cli.editDraft(
+                let saved = try await cli.editDraft(
                     id: id, account: accountEmail,
                     to: toList, cc: ccList, bcc: bccList,
                     subject: subject, text: body, html: html,
-                    attachments: existingAttachments
+                    attachments: existingAttachments,
+                    replyTo: splitAddresses(compose.replyTo),
+                    scheduledAt: compose.scheduledAt.map { Self.isoFormatter.string(from: $0) },
+                    clearSchedule: compose.scheduledAt == nil,
+                    clearHTML: html == nil
                 )
+                guard compose.generation == generation else { return }
+                adoptDraftAttachments(saved, replacing: existingAttachments)
             } else {
                 let draft = try await cli.createDraft(
                     account: accountEmail,
                     to: toList, cc: ccList, bcc: bccList,
                     subject: subject, text: body, html: html,
                     attachments: existingAttachments,
-                    replyToMessageID: compose.replyToID
+                    replyToMessageID: compose.replyToID,
+                    replyTo: splitAddresses(compose.replyTo),
+                    scheduledAt: compose.scheduledAt.map { Self.isoFormatter.string(from: $0) }
                 )
+                guard compose.generation == generation else { return }
                 compose.editingDraftID = draft.id
+                adoptDraftAttachments(draft, replacing: existingAttachments)
             }
+            guard compose.generation == generation else { return }
+            compose.error = nil
             compose.lastAutosaveAt = Date()
         } catch {
             // A cancelled CLI call (user kept typing → debounce superseded this
@@ -1303,34 +1508,38 @@ final class AppState {
             // the account not existing in any profile, or the draft id
             // going stale.
             let actionable = ActionableError.classify(error)
-            flashStatus(.info("Draft autosave failed: \(actionable.message)"))
+            compose.error = "Draft could not be saved: \(actionable.message)"
+        }
+    }
+
+    private func adoptDraftAttachments(_ draft: Draft, replacing originals: [URL]) {
+        guard let paths = draft.attachment_paths, paths.count == originals.count else { return }
+        // Typing/removing/adding files can continue during the save. Replace
+        // only URLs still present; do not resurrect a removed attachment.
+        for (original, path) in zip(originals, paths) {
+            if let index = compose.attachments.firstIndex(of: original) {
+                compose.attachments[index] = URL(fileURLWithPath: path)
+            }
         }
     }
 
     /// Explicit "Discard" — deletes the backing draft and clears compose state.
     func discardDraft() async {
-        if let id = compose.editingDraftID {
-            try? await cli.deleteDraft(id: id)
-        }
-        compose.clear()
-        router.currentView = .inbox
-        await refreshDrafts()
+        compose.autosaveTask?.cancel()
+        compose.autosaveTask = nil
+        if let active = activeAutosave { await active.value }
+        do {
+            if let id = compose.editingDraftID { try await cli.deleteDraft(id: id) }
+            compose.clear()
+            router.currentView = .inbox
+            await refreshDrafts()
+        } catch { compose.error = ActionableError.classify(error).message }
     }
 
-    /// Called on popover close / app quit — flush any pending debounce.
-    ///
-    /// If a debounced save is already mid-CLI-round-trip, its field snapshot was
-    /// taken *before* the await, so any keystrokes the user typed after that and
-    /// before closing would be lost if we just bailed on the reentrancy guard.
-    /// Wait out the in-flight save (everything here is main-actor isolated, so
-    /// `isAutosaving` flips false synchronously when it returns), then write one
-    /// final time capturing the latest fields. The yield loop is bounded to a
-    /// single sub-second CLI round-trip and only runs on close/quit.
     func flushAutosave() async {
         compose.autosaveTask?.cancel()
         compose.autosaveTask = nil
-        while compose.isAutosaving { await Task.yield() }
-        await performAutosave()
+        await saveLatestDraft()
     }
 
     // ── Attachment mutations (centralised) ───────────────────────────────
@@ -1414,25 +1623,41 @@ final class AppState {
         compose.subject = alreadyForwarded ? sub : "Fwd: \(sub)"
         compose.body = Self.buildForwardBody(for: message)
         router.currentView = .compose(nil)
-        // Re-attach the original's attachments. Fire-and-forget — the user
-        // sees the compose window open immediately and the chips slide in
-        // as each file downloads. Fails silently per-file (manifests as a
-        // missing attachment in the chip row).
-        Task { [weak self] in await self?.reattachOriginalAttachments(for: message.id) }
+        let generation = compose.generation
+        compose.isLoadingAttachments = true
+        forwardAttachmentTask = Task { [weak self] in
+            await self?.reattachOriginalAttachments(for: message.id, generation: generation)
+        }
     }
+
+    private var forwardAttachmentTask: Task<Void, Never>?
+
+    func waitForAttachmentDownloads() async { await forwardAttachmentTask?.value }
 
     /// Download every attachment on the source message into a temp directory
     /// and append the file URLs to `compose.attachments`. Mirrors what Apple
     /// Mail / Gmail do when you Forward — the user expects the original
     /// files to ride along.
-    private func reattachOriginalAttachments(for messageID: Int64) async {
-        guard let list = try? await cli.listAttachments(messageID: messageID),
-              !list.isEmpty else { return }
+    private func reattachOriginalAttachments(for messageID: Int64, generation: UUID) async {
+        guard compose.generation == generation else { return }
+        defer { if compose.generation == generation { compose.isLoadingAttachments = false } }
+        let list: [Attachment]
+        do { list = try await cli.listAttachments(messageID: messageID) }
+        catch {
+            guard compose.generation == generation else { return }
+            // Persist a missing-file chip so closing/reopening the draft can
+            // never turn a failed attachment lookup into a successful omission.
+            addAttachment(FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("Original attachments could not be loaded"))
+            compose.error = "Original attachments could not be loaded. Reattach them, or remove the missing-file chip to continue without them."
+            return
+        }
+        guard compose.generation == generation, !list.isEmpty else { return }
         let tempBase = FileManager.default.temporaryDirectory
             .appendingPathComponent("minimail-fwd-\(messageID)-\(Int(Date().timeIntervalSince1970))",
                                     isDirectory: true)
         try? FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
         for attachment in list {
+            guard compose.generation == generation else { return }
             // The filename is server/sender-controlled. `appendingPathComponent`
             // does NOT strip `..`, so a name like "../../../../Library/..."
             // would let a malicious sender write attachment bytes to an
@@ -1444,7 +1669,7 @@ final class AppState {
             if leaf.isEmpty || leaf == "." || leaf == ".." || leaf.hasPrefix(".") {
                 leaf = "attachment-\(attachment.id)"
             }
-            let dest = tempBase.appendingPathComponent(leaf)
+            let dest = tempBase.appendingPathComponent(UUID().uuidString + "-" + leaf)
             guard dest.standardizedFileURL.path
                 .hasPrefix(tempBase.standardizedFileURL.path + "/") else {
                 Log.cli.error("rejected forward attachment with traversal filename")
@@ -1459,9 +1684,13 @@ final class AppState {
                 // to skip autosave, so forward-with-attachments drafts lost
                 // the files if the user closed the popover before the
                 // download finished.
+                guard compose.generation == generation else { return }
                 addAttachment(dest)
             } catch {
                 Log.cli.error("forward re-attach failed for \(leaf, privacy: .public): \(String(describing: error), privacy: .public)")
+                guard compose.generation == generation else { return }
+                addAttachment(dest)
+                compose.error = "An attachment could not be downloaded. Reattach it, or remove its missing-file chip to continue without it."
             }
         }
     }
@@ -1595,7 +1824,17 @@ final class AppState {
     /// The old `cli.send` call is now invoked from `firePendingSend()` after
     /// the delay expires.
     func send() async -> Bool {
+        guard !compose.isSending, deliveringSend == nil else { return false }
+        guard !compose.isLoadingAttachments else {
+            compose.error = "Wait for the original attachments to finish downloading."
+            return false
+        }
+        NotificationCenter.default.post(name: .minimailCommitRecipients, object: nil)
+        compose.isSending = true
+        defer { compose.isSending = false }
         compose.error = nil
+        await flushAutosave()
+        guard compose.error == nil else { return false }
         let to = splitAddresses(compose.to)
         let cc = splitAddresses(compose.cc)
         let bcc = splitAddresses(compose.bcc)
@@ -1624,17 +1863,18 @@ final class AppState {
         //   1. compose.fromOverride (user picked it explicitly in the dropdown)
         //   2. composeFromAccount (currentAccount, or default, or first)
         let fromAccount = compose.fromOverride?.email ?? composeFromAccount?.email
-        // Drop attachments whose files have vanished since they were added
-        // (temp cleanup, ejected volume, move). The Rust side opens every
-        // path and hard-errors on the first miss, so an unfiltered list would
-        // abort the entire send — mirror the exact filter `performAutosave`
-        // already applies one method over so the two paths can't drift.
+        // Missing files require repair; never silently send fewer attachments.
         let existingAttachments = compose.attachments.filter {
             FileManager.default.fileExists(atPath: $0.path)
         }
         let droppedAttachments = compose.attachments.count - existingAttachments.count
         if droppedAttachments > 0 {
-            flashStatus(.info("\(droppedAttachments) attachment file\(droppedAttachments == 1 ? "" : "s") no longer on disk — not sent"))
+            compose.error = "An attachment is missing. Remove it or attach the file again before sending."
+            return false
+        }
+        if let scheduled = compose.scheduledAt, scheduled <= Date() {
+            compose.error = "Choose a future send time."
+            return false
         }
         // Scheduled sends bypass the local undo window — Resend holds them
         // server-side and the user picked a wake time minutes-to-days out, so
@@ -1673,6 +1913,7 @@ final class AppState {
         pendingSendTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.undoSendWindow))
             if Task.isCancelled { return }
+            self?.pendingSendTask = nil
             await self?.firePendingSend()
         }
         return true
@@ -1686,6 +1927,12 @@ final class AppState {
         pendingSendTask = nil
         pendingSend = nil
         deliveringSend = snap
+        defer {
+            deliveringSend = nil
+            let waiters = deliveryWaiters
+            deliveryWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
         do {
             try await cli.send(
                 from: snap.from,
@@ -1703,13 +1950,12 @@ final class AppState {
             if let draftID = snap.originalDraftID {
                 try? await cli.deleteDraft(id: draftID)
             }
-            deliveringSend = nil
             // Successful send clears any stale failure affordance from a
             // previous attempt — the banner was about that attempt, not this
             // one.
             lastFailedSend = nil
             lastOutboxSnapshot = []
-            flashStatus(.sent)
+            flashStatus(snap.scheduledAt == nil ? .sent : .info("Scheduled for delivery"))
             await refreshInbox(pull: false)
             if inbox.currentFolder == .drafts { await refreshDrafts() }
         } catch {
@@ -1718,7 +1964,6 @@ final class AppState {
             // implementation nilled `pendingSend` and flashed an error that
             // disappeared — the message felt "lost" even though email-cli
             // had persisted it in the outbox table. (ritalin O-022)
-            deliveringSend = nil
             lastFailedSend = snap
             // Snapshot the outbox so the banner can show the matching failed
             // row (status + attempts + last_error). Best-effort: a failure to
@@ -1726,11 +1971,7 @@ final class AppState {
             // works off `lastFailedSend`.
             lastOutboxSnapshot = (try? await cli.outboxList(account: snap.from)) ?? []
             let classified = ActionableError.classify(error)
-            if case .other = classified {
-                inbox.error = .other(Self.describeSendError(error))
-            } else {
-                inbox.error = classified
-            }
+            inbox.error = classified
             Log.send.error("send failed: \(String(describing: error), privacy: .public)")
         }
     }
@@ -1738,60 +1979,9 @@ final class AppState {
     /// Re-queue the last failed send as a fresh pendingSend and fire it
     /// immediately. Matches "Retry" on the recovery banner.
     func retryLastFailedSend() async {
-        guard let snap = lastFailedSend else { return }
-        lastFailedSend = nil
-        lastOutboxSnapshot = []
-        // Keep the deadline in the past so firePendingSend runs right away
-        // rather than re-arming the 10s undo window (the user already
-        // explicitly chose to retry).
-        let requeued = PendingSend(
-            from: snap.from, to: snap.to, cc: snap.cc, bcc: snap.bcc,
-            replyTo: snap.replyTo,
-            subject: snap.subject, text: snap.text, html: snap.html,
-            attachments: snap.attachments,
-            replyToMessageID: snap.replyToMessageID,
-            scheduledAt: snap.scheduledAt,
-            originalDraftID: snap.originalDraftID,
-            queuedAt: Date(),
-            deadline: Date()
-        )
-        pendingSend = requeued
-        await firePendingSend()
-    }
-
-    /// Restore the failed snapshot back into the compose view so the user can
-    /// edit before retrying (fix the bad address, reword, etc.). Matches
-    /// "Edit" on the recovery banner.
-    func editLastFailedSend() {
-        guard let snap = lastFailedSend else { return }
-        lastFailedSend = nil
-        lastOutboxSnapshot = []
-        compose.clear()
-        compose.to = snap.to.joined(separator: ", ")
-        compose.cc = snap.cc.joined(separator: ", ")
-        compose.bcc = snap.bcc.joined(separator: ", ")
-        compose.subject = snap.subject
-        // Prefer HTML round-trip when the snapshot has it so bold/italic/links
-        // survive the recovery path — matches undoPendingSend's rich-text
-        // restore. Falls back to plain text.
-        if let html = snap.html, let data = html.data(using: .utf8),
-           let attr = try? NSAttributedString(
-               data: data,
-               options: [.documentType: NSAttributedString.DocumentType.html,
-                         .characterEncoding: String.Encoding.utf8.rawValue],
-               documentAttributes: nil
-           ) {
-            compose.bodyAttributed = attr
-        } else {
-            compose.body = snap.text ?? ""
-        }
-        compose.attachments = snap.attachments
-        compose.replyToID = snap.replyToMessageID
-        compose.editingDraftID = snap.originalDraftID
-        if let fromEmail = snap.from {
-            compose.fromOverride = session.accounts.first { $0.email == fromEmail }
-        }
-        router.currentView = .compose(snap.replyToMessageID)
+        // Retry the durable outbox row through Settings so its idempotency
+        // key and attachment snapshot survive. A fresh send can duplicate mail.
+        await openOutbox()
     }
 
     /// User dismissed the banner without choosing. Drops the in-memory
@@ -1832,6 +2022,11 @@ final class AppState {
 
     /// Cancel the pending send and restore the compose view with every field
     /// exactly as the user left it. Called when the user hits Undo on the toast.
+    func restorePendingSend() async {
+        guard await prepareToLeaveCompose() else { return }
+        undoPendingSend()
+    }
+
     func undoPendingSend() {
         guard let snap = pendingSend else { return }
         pendingSendTask?.cancel()
@@ -1864,17 +2059,26 @@ final class AppState {
         compose.attachments = snap.attachments
         compose.replyToID = snap.replyToMessageID
         compose.editingDraftID = snap.originalDraftID
+        compose.replyTo = snap.replyTo.joined(separator: ", ")
+        compose.scheduledAt = snap.scheduledAt.flatMap(Dates.parse)
+        compose.fromOverride = session.accounts.first { $0.email == snap.from }
         router.currentView = .compose(snap.replyToMessageID)
     }
 
-    /// Fire any in-flight pending send immediately. Called on popover close
-    /// / app quit so we don't lose the user's message.
+    /// Complete a queued send on explicit Send Now or app quit. Hiding the
+    /// interface keeps the full Undo Send interval.
     func flushPendingSendNow() async {
         pendingSendTask?.cancel()
         pendingSendTask = nil
         if pendingSend != nil {
             await firePendingSend()
         }
+    }
+
+    /// Quit waits for the active send to settle, including its draft cleanup.
+    func waitForDelivery() async {
+        guard deliveringSend != nil else { return }
+        await withCheckedContinuation { deliveryWaiters.append($0) }
     }
 
     private func flashStatus(_ status: TransientStatus) {

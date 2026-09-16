@@ -40,7 +40,7 @@ struct ReaderView: View {
             Spacer()
 
             if let msg = state.reader.loaded {
-                Button { state.startCompose(replyTo: msg) } label: {
+                Button { Task { await state.composeReply(to: msg) } } label: {
                     Image(systemName: "arrowshape.turn.up.left")
                 }
                 .buttonStyle(IconButtonStyle())
@@ -48,7 +48,7 @@ struct ReaderView: View {
                 .accessibilityLabel("Reply")
                 .keyboardShortcut("r", modifiers: .command)
 
-                Button { state.startCompose(replyTo: msg, replyAll: true) } label: {
+                Button { Task { await state.composeReply(to: msg, replyAll: true) } } label: {
                     Image(systemName: "arrowshape.turn.up.left.2")
                 }
                 .buttonStyle(IconButtonStyle())
@@ -56,7 +56,7 @@ struct ReaderView: View {
                 .accessibilityLabel("Reply all")
                 .keyboardShortcut("r", modifiers: [.command, .shift])
 
-                Button { state.startForward(of: msg) } label: {
+                Button { Task { await state.composeReply(to: msg, forward: true) } } label: {
                     Image(systemName: "arrowshape.turn.up.right")
                 }
                 .buttonStyle(IconButtonStyle())
@@ -65,13 +65,16 @@ struct ReaderView: View {
                 .keyboardShortcut("f", modifiers: [.command, .shift])
 
                 Button {
-                    Task { await state.archive(message: msg) }
+                    Task {
+                        if msg.isArchived { await state.unarchive(message: msg) }
+                        else { await state.archive(message: msg) }
+                    }
                 } label: {
-                    Image(systemName: "archivebox")
+                    Image(systemName: msg.isArchived ? "tray.and.arrow.down" : "archivebox")
                 }
                 .buttonStyle(IconButtonStyle())
-                .help("Archive (⌘⌫)")
-                .accessibilityLabel("Archive message")
+                .help(msg.isArchived ? "Move to Inbox (⌘⌫)" : "Archive (⌘⌫)")
+                .accessibilityLabel(msg.isArchived ? "Move to Inbox" : "Archive message")
                 .keyboardShortcut(.delete, modifiers: .command)
 
                 Button {
@@ -81,15 +84,11 @@ struct ReaderView: View {
                         .foregroundStyle(msg.isStarred ? .yellow : .secondary)
                 }
                 .buttonStyle(IconButtonStyle())
-                .help(msg.isStarred ? "Unstar" : "Star (S)")
+                .help(msg.isStarred ? "Unstar" : "Star (⇧⌘L)")
                 .accessibilityLabel(msg.isStarred ? "Unstar message" : "Star message")
-                // Bare `s` (no modifier) is intentional — Gmail / Superhuman
-                // convention for star toggle in reader view. Safe here because
-                // the reader has no descendant text fields; any TextField
-                // descendant would consume the keystroke before this fires.
-                // Do NOT move this shortcut to RootView (would swallow `s`
-                // in every search / subject / body input).
-                .keyboardShortcut("s", modifiers: [])
+                // The window has a sibling search field; bare letters must
+                // remain available for text input throughout the client.
+                .keyboardShortcut("l", modifiers: [.command, .shift])
 
                 Menu {
                     Button("Later today (4h)") { Task { await state.snooze(msg, until: "4h") } }
@@ -101,8 +100,13 @@ struct ReaderView: View {
                         Button("Unsnooze") { Task { await state.unsnooze(msg) } }
                     }
                     Divider()
-                    Button("Mark as Unread") {
-                        Task { await state.markUnread(message: msg) }
+                    if msg.direction == "received" {
+                        Button(msg.isUnread ? "Mark as Read" : "Mark as Unread") {
+                            Task {
+                                if msg.isUnread { await state.markRead(message: msg) }
+                                else { await state.markUnread(message: msg) }
+                            }
+                        }
                     }
                     if msg.hasUnsubscribeLink {
                         Divider()
@@ -172,9 +176,15 @@ struct ReaderView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let msg = state.reader.loaded {
+        if let msg = state.reader.loaded, state.reader.error == nil {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    Text(msg.displaySubject)
+                        .font(.system(size: state.router.isExpanded ? 22 : 17, weight: .semibold))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(16)
+                    if state.reader.isLoading { ProgressView().controlSize(.small).padding(.horizontal, 16) }
                     if state.reader.thread.count > 1 {
                         threadStack(focusedID: msg.id)
                     } else {
@@ -192,6 +202,7 @@ struct ReaderView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
+                Button("Try Again") { state.openMessage(id: messageID) }
                 Button("Back to inbox") { state.back() }
                     .controlSize(.small)
             }
@@ -524,23 +535,6 @@ struct ReaderView: View {
                             Capsule().fill(Color.primary.opacity(0.08))
                         )
                 }
-                // Quiet "first contact" pill — fires when no other message
-                // in the loaded inbox came from this sender. Cheaper than
-                // the brand-lookalike warning above and helps the user
-                // notice a new conversation thread (which is when phishing
-                // attempts tend to slip through). Skipped on sent mail and
-                // when there are no messages loaded (cold start).
-                if !isSent, isFirstContact(msg) {
-                    Text("first contact")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(
-                            Capsule().fill(Color.orange.opacity(0.14))
-                        )
-                        .help("This is the first message we've seen from \(parts.email).")
-                }
                 // In multi-account mode, which inbox actually received this
                 // message — otherwise indistinguishable from another account
                 // when the user reads via the unified All-Accounts view.
@@ -553,25 +547,6 @@ struct ReaderView: View {
                 }
             }
         }
-    }
-
-    /// True when no other message in the currently-loaded inbox came
-    /// from the same email address. Best-effort heuristic — bounded by
-    /// the loaded set (~100 messages by default), so a sender who hasn't
-    /// written in months may falsely register as "first contact" once
-    /// their old messages page out. Acceptable for v1; would need a CLI
-    /// "have I corresponded with X?" query for the strict version.
-    private func isFirstContact(_ msg: Message) -> Bool {
-        let other = msg.fromParts.email.lowercased()
-        guard !other.isEmpty else { return false }
-        // Need at least one other message to compare against — otherwise
-        // we'd flag every message on a freshly-launched cold cache.
-        guard state.inbox.messages.count > 1 else { return false }
-        for candidate in state.inbox.messages {
-            if candidate.id == msg.id { continue }
-            if candidate.fromParts.email.lowercased() == other { return false }
-        }
-        return true
     }
 
     /// "to me" / "cc me" — only emitted for received mail and only when the
@@ -629,21 +604,21 @@ struct ReaderView: View {
                 let showReplyAll = hasCc || multipleTo
 
                 if showReplyAll {
-                    Button { state.startCompose(replyTo: msg, replyAll: true) } label: {
+                    Button { Task { await state.composeReply(to: msg, replyAll: true) } } label: {
                         Label("Reply All", systemImage: "arrowshape.turn.up.left.2")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .help("Reply to sender and all other recipients (⌘⇧R)")
 
-                    Button { state.startCompose(replyTo: msg) } label: {
+                    Button { Task { await state.composeReply(to: msg) } } label: {
                         Label("Reply", systemImage: "arrowshape.turn.up.left")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("Reply to sender only (⌘R)")
                 } else {
-                    Button { state.startCompose(replyTo: msg) } label: {
+                    Button { Task { await state.composeReply(to: msg) } } label: {
                         Label("Reply", systemImage: "arrowshape.turn.up.left")
                     }
                     .buttonStyle(.borderedProminent)
@@ -657,6 +632,10 @@ struct ReaderView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
+            Button { state.openPrevious() } label: { Image(systemName: "chevron.up") }
+                .buttonStyle(.borderless).help("Previous message").accessibilityLabel("Previous message")
+            Button { state.openNext() } label: { Image(systemName: "chevron.down") }
+                .buttonStyle(.borderless).help("Next message").accessibilityLabel("Next message")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

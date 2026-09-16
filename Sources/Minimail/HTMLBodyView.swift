@@ -105,6 +105,14 @@ private struct HTMLWebView: NSViewRepresentable {
         prefs.allowsContentJavaScript = false
         config.defaultWebpagePreferences = prefs
         config.websiteDataStore = .nonPersistent()
+        config.userContentController.add(context.coordinator, contentWorld: .defaultClient, name: "mailHeight")
+        // An isolated host script observes layout; email-provided scripts stay disabled.
+        config.userContentController.addUserScript(WKUserScript(source: """
+            const report = () => window.webkit.messageHandlers.mailHeight.postMessage(document.body.getBoundingClientRect().height);
+            new ResizeObserver(report).observe(document.body);
+            document.addEventListener('toggle', report, true);
+            report();
+            """, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
 
         // PassthroughWebView's scrollWheel forwards every event to the next
         // responder so the outer SwiftUI ScrollView always wins. Combined
@@ -136,6 +144,16 @@ private struct HTMLWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.parent = self
+        if !remoteContentAllowed && context.coordinator.remoteContentAllowed {
+            webView.stopLoading()
+            context.coordinator.remoteContentAllowed = false
+            context.coordinator.rulesReady = false
+            context.coordinator.lastLoadedHTML = nil
+            context.coordinator.pendingHTML = wrappedHTML
+            Self.attachRuleList(to: webView, coordinator: context.coordinator)
+            return
+        }
         // Opt-in flip: if the user just allowed remote content, strip the
         // rule list off THIS webview, mark the coordinator's state so it
         // doesn't re-attach, then reload the HTML so previously-blocked
@@ -156,6 +174,12 @@ private struct HTMLWebView: NSViewRepresentable {
         if context.coordinator.rulesReady {
             context.coordinator.flushPending()
         }
+    }
+
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.stopLoading()
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "mailHeight", contentWorld: .defaultClient)
+        webView.navigationDelegate = nil
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -260,8 +284,8 @@ private struct HTMLWebView: NSViewRepresentable {
     // ── Coordinator ──────────────────────────────────────────────────────
 
     @MainActor
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        let parent: HTMLWebView
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        var parent: HTMLWebView
         weak var webView: WKWebView?
         var rulesReady = false
         var pendingHTML: String?
@@ -324,22 +348,21 @@ private struct HTMLWebView: NSViewRepresentable {
             }
         }
 
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.frameInfo.isMainFrame, let number = message.body as? NSNumber else { return }
+            updateHeight(number.doubleValue)
+        }
+
+        private func updateHeight(_ value: Double) {
+            guard value.isFinite, value >= 0 else { return }
+            let height = max(40, value.rounded(.up))
+            if abs(parent.height - height) > 1 { parent.height = height }
+        }
+
         private func measureHeight(in webView: WKWebView) {
-            webView.evaluateJavaScript(
-                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"
-            ) { [weak self] result, _ in
-                guard let self else { return }
-                let h: CGFloat = {
-                    if let n = result as? CGFloat { return n }
-                    if let n = result as? Double { return CGFloat(n) }
-                    if let n = result as? Int { return CGFloat(n) }
-                    return 80
-                }()
-                let clamped = max(40, min(h, 8000))
-                Task { @MainActor in
-                    if abs(self.parent.height - clamped) > 1 {
-                        self.parent.height = clamped
-                    }
+            webView.evaluateJavaScript("document.body.getBoundingClientRect().height", in: nil, in: .defaultClient) { [weak self] result in
+                if case .success(let value) = result, let number = value as? NSNumber {
+                    self?.updateHeight(number.doubleValue)
                 }
             }
         }
@@ -356,7 +379,10 @@ private struct HTMLWebView: NSViewRepresentable {
                 decisionHandler(.cancel)
                 return
             }
-            decisionHandler(.allow)
+            // Mail must not navigate itself to a remote document (meta refresh,
+            // form submission, or a frame), even after image opt-in.
+            let scheme = navigationAction.request.url?.scheme?.lowercased()
+            decisionHandler(scheme == "about" ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView,
@@ -389,11 +415,11 @@ private struct HTMLWebView: NSViewRepresentable {
         return """
         <!doctype html><html><head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=420, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
           html, body {
             margin: 0;
-            padding: 14px;
+            padding: 0;
             background: transparent !important;
             color: \(fg);
             font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
@@ -401,6 +427,8 @@ private struct HTMLWebView: NSViewRepresentable {
             text-size-adjust: 100%;
             overflow: hidden;
           }
+          body { padding: 14px; box-sizing: border-box; overflow-wrap: anywhere; }
+          pre { white-space: pre-wrap; }
           body > :first-child { margin-top: 0; }
           a { color: \(link); }
           img { max-width: 100%; height: auto; }

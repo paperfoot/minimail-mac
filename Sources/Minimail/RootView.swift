@@ -10,6 +10,9 @@ struct RootView: View {
             backgroundLayer.ignoresSafeArea()
 
             Group {
+                if state.router.isExpanded {
+                    MailWindowView()
+                } else {
                 switch state.router.currentView {
                 case .inbox:
                     InboxView()
@@ -33,47 +36,55 @@ struct RootView: View {
                     AccountSwitcherView()
                         .transition(.move(edge: .top).combined(with: .opacity))
                 case .settings:
-                    SettingsView()
+                    SettingsView(initialSection: state.router.settingsSection)
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 case .needsInstall:
                     NeedsInstallView()
                 case .onboarding:
                     OnboardingView()
                 }
+                }
             }
 
-            if state.pendingLaunchAtLoginOffer {
-                LaunchAtLoginOfferCard()
-                    .padding(.bottom, 12)
-                    .padding(.horizontal, 16)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if state.pendingSend != nil {
-                UndoSendToast()
-                    .padding(.bottom, 12)
-                    .padding(.horizontal, 16)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if state.deliveringSend != nil {
-                SendingNowToast()
-                    .padding(.bottom, 12)
-                    .padding(.horizontal, 16)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if state.lastFailedSend != nil {
-                // Send failed after the undo window — the message is in the
-                // Rust outbox table under status='failed', not lost. Offer
-                // Retry + Edit so the user has a path back. Phase-3 adds a
-                // full outbox-management UI; for now the banner is enough.
-                OutboxRecoveryBanner()
-                    .padding(.bottom, 12)
-                    .padding(.horizontal, 16)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let status = state.transientStatus {
-                TransientStatusToast(status: status)
-                    .padding(.bottom, 12)
-                    .padding(.horizontal, 16)
-                    .transition(.opacity)
+
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if !state.router.isExpanded {
+                HStack {
+                    Text("Minimail").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        NotificationCenter.default.post(name: .minimailExpandWindow, object: nil)
+                    } label: {
+                        Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Open full mail window (⌥⌘1)")
+                    .accessibilityLabel("Open full mail window")
+                    Menu {
+                        Button("Open Mail Window") { NotificationCenter.default.post(name: .minimailExpandWindow, object: nil) }
+                        Button("Settings…") { Task { await state.navigate(to: .settings) } }
+                        Divider()
+                        Button("Quit Minimail", role: .destructive) { NSApp.terminate(nil) }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton).fixedSize()
+                    .accessibilityLabel("Minimail menu")
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 14).padding(.vertical, 6)
             }
         }
-        .frame(width: 420, height: 580)
+        .onExitCommand {
+            if state.router.currentView == .inbox && !state.router.isExpanded {
+                NotificationCenter.default.post(name: .minimailClosePopover, object: nil)
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            statusBanner.frame(maxWidth: state.router.isExpanded ? 650 : .infinity)
+        }
         .clipped()
         // Reduce Motion (System Settings → Accessibility) replaces the
         // spring transitions with `nil` so nothing animates.
@@ -107,6 +118,37 @@ struct RootView: View {
     }
 
     @ViewBuilder
+    private var statusBanner: some View {
+            if state.pendingSend != nil {
+                UndoSendToast()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if state.deliveringSend != nil {
+                SendingNowToast()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if state.lastFailedSend != nil {
+                // Retry through the durable outbox so the original delivery
+                // identity is preserved if the server response was lost.
+                OutboxRecoveryBanner()
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if state.pendingLaunchAtLoginOffer {
+                LaunchAtLoginOfferCard()
+                    .padding(.bottom, 12).padding(.horizontal, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let status = state.transientStatus {
+                TransientStatusToast(status: status)
+                    .padding(.bottom, 12)
+                    .padding(.horizontal, 16)
+                    .transition(.opacity)
+            }
+    }
+
+    @ViewBuilder
     private var accountQuickSwitcherShortcuts: some View {
         ZStack {
             // ⌘0 → unified "All Accounts" inbox.
@@ -128,7 +170,7 @@ struct RootView: View {
     }
 
     private var backgroundLayer: some View {
-        Color.clear.containerBackground(.thinMaterial, for: .window)
+        Color(nsColor: .windowBackgroundColor)
     }
 }
 
@@ -207,7 +249,7 @@ struct OnboardingView: View {
             .buttonStyle(.borderedProminent)
             .disabled(inFlight || apiKey.isEmpty || !email.looksLikeEmail)
 
-            Text("Settings can repair the key, install the CLI for agents, and add more accounts via a copyable command.")
+            Text("Add more accounts and manage your signature in Settings.")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -241,8 +283,8 @@ struct OnboardingView: View {
         let profileName = "default"
         do {
             // Profile creation is idempotent on the CLI (ON CONFLICT UPDATE).
-            try await EmailCLI.shared.addProfile(name: profileName, apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
-            try await EmailCLI.shared.addAccount(
+            try await state.saveMailProfile(name: profileName, apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
+            try await state.addMailAccount(
                 email: email.trimmingCharacters(in: .whitespacesAndNewlines),
                 profile: profileName,
                 makeDefault: true
@@ -278,7 +320,7 @@ struct UndoSendToast: View {
                         .foregroundStyle(.primary)
                 }
                 Spacer()
-                Button("Undo") { state.undoPendingSend() }
+                Button("Undo") { Task { await state.restorePendingSend() } }
                     .buttonStyle(.plain)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
@@ -393,14 +435,8 @@ struct TransientStatusToast: View {
     }
 }
 
-/// Recovery banner shown when a send failed after the undo window expired.
-/// The message is NOT lost — the Rust outbox table has it under
-/// status='failed' — but the user had no path back before this banner
-/// landed. Retry re-queues the snapshot; Edit repopulates compose so they
-/// can fix e.g. a bad recipient. Dismiss drops the in-memory affordance;
-/// the outbox row stays for a future "Sent → Stuck mail" UI. Style matches
-/// the existing toasts (capsule, glass, system edges) so it feels like part
-/// of the family — Phase 3 gets the richer outbox manager.
+/// Recovery links to the durable outbox, whose retry keeps the original
+/// idempotency key and attachment snapshot.
 struct OutboxRecoveryBanner: View {
     @Environment(AppState.self) private var state
 
@@ -414,17 +450,13 @@ struct OutboxRecoveryBanner: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
             Spacer()
-            Button("Retry") { Task { await state.retryLastFailedSend() } }
+            Button("Outbox") { Task { await state.retryLastFailedSend() } }
                 .buttonStyle(.plain)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 3)
                 .background(Color.accentColor.opacity(0.15), in: Capsule())
-            Button("Edit") { state.editLastFailedSend() }
-                .buttonStyle(.plain)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
             Button {
                 state.dismissLastFailedSend()
             } label: {
