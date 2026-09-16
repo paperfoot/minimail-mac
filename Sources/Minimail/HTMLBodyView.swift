@@ -31,14 +31,18 @@ struct HTMLBodyView: View {
     /// since the whole point of the rule list is to block remote trackers
     /// and tracking pixels in incoming mail.
     @State private var rulesFailed: Bool = false
+    @State private var linkError: String?
 
     init(html: String, remoteContentAllowed: Bool = false) {
-        self.wrappedHTML = HTMLWebView.wrap(html)
+        self.wrappedHTML = EmailHTML.wrappedDocument(html)
         self.remoteContentAllowed = remoteContentAllowed
     }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
+            if let linkError {
+                Text(linkError).font(.caption).foregroundStyle(.secondary).padding(12)
+            }
             if rulesFailed {
                 // Fail-closed banner. We intentionally do NOT load the email
                 // HTML when the blocker rule list didn't compile — the HTML
@@ -60,7 +64,8 @@ struct HTMLBodyView: View {
                     wrappedHTML: wrappedHTML,
                     remoteContentAllowed: remoteContentAllowed,
                     height: $measuredHeight,
-                    rulesFailed: $rulesFailed
+                    rulesFailed: $rulesFailed,
+                    linkError: $linkError
                 )
                 .frame(height: measuredHeight)
             }
@@ -72,6 +77,7 @@ struct HTMLBodyView: View {
         // the compile retried successfully on the next instance.
         .onChange(of: wrappedHTML) { _, _ in
             if rulesFailed { rulesFailed = false }
+            linkError = nil
         }
     }
 }
@@ -94,8 +100,9 @@ private struct HTMLWebView: NSViewRepresentable {
     /// Parent uses this to swap the web view out for a fail-closed banner
     /// rather than leaking remote resource loads.
     @Binding var rulesFailed: Bool
+    @Binding var linkError: String?
 
-    func makeNSView(context: Context) -> WKWebView {
+    func makeNSView(context: Context) -> HTMLHostView {
         let config = WKWebViewConfiguration()
         // `allowsContentJavaScript = false` blocks scripts inside the loaded
         // page (security: tracking/exfil). It does NOT prevent host-side
@@ -108,6 +115,21 @@ private struct HTMLWebView: NSViewRepresentable {
         config.userContentController.add(context.coordinator, contentWorld: .defaultClient, name: "mailHeight")
         // An isolated host script observes layout; email-provided scripts stay disabled.
         config.userContentController.addUserScript(WKUserScript(source: """
+            // Wrap the document without altering sender colors or table widths.
+            // Wide invoices/newsletters remain reachable with a horizontal gesture.
+            const content = document.createElement('div');
+            content.className = 'mm-document';
+            while (document.body.firstChild) content.appendChild(document.body.firstChild);
+            document.body.appendChild(content);
+            document.querySelectorAll('blockquote').forEach(quote => {
+                if (quote.parentElement.closest('blockquote, details')) return;
+                const details = document.createElement('details');
+                details.className = 'mm-quote';
+                const summary = document.createElement('summary');
+                summary.textContent = 'Show quoted content';
+                quote.replaceWith(details);
+                details.append(summary, quote);
+            });
             const report = () => window.webkit.messageHandlers.mailHeight.postMessage(document.body.getBoundingClientRect().height);
             new ResizeObserver(report).observe(document.body);
             document.addEventListener('toggle', report, true);
@@ -140,10 +162,11 @@ private struct HTMLWebView: NSViewRepresentable {
             guard let webView else { return }
             Self.disableInternalElasticity(in: webView)
         }
-        return webView
+        return HTMLHostView(webView: webView)
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {
+    func updateNSView(_ host: HTMLHostView, context: Context) {
+        let webView = host.webView
         context.coordinator.parent = self
         if !remoteContentAllowed && context.coordinator.remoteContentAllowed {
             webView.stopLoading()
@@ -176,7 +199,8 @@ private struct HTMLWebView: NSViewRepresentable {
         }
     }
 
-    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+    static func dismantleNSView(_ host: HTMLHostView, coordinator: Coordinator) {
+        let webView = host.webView
         webView.stopLoading()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "mailHeight", contentWorld: .defaultClient)
         webView.navigationDelegate = nil
@@ -273,13 +297,9 @@ private struct HTMLWebView: NSViewRepresentable {
         }
     }
 
-    private static let blockRulesJSON: String = """
-    [
-      {"trigger": {"url-filter": "^https?://.*",
-                   "resource-type": ["image","style-sheet","font","raw","media","svg-document","document","script","fetch","websocket","ping","other"]},
-       "action": {"type": "block"}}
-    ]
-    """
+    // Omit resource-type to block every remote request, including CSS and frames.
+    // Unsupported resource-type names make WebKit reject the entire rule list.
+    private static let blockRulesJSON = EmailHTML.blockRulesJSON
 
     // ── Coordinator ──────────────────────────────────────────────────────
 
@@ -299,22 +319,7 @@ private struct HTMLWebView: NSViewRepresentable {
 
         func flushPending() {
             guard let html = pendingHTML, let webView else { return }
-            // When the user has opted into remote content for this message,
-            // inject a style override so the belt-and-braces
-            // `img[src^="http"] { display: none }` CSS stops hiding images.
-            // The WKContentRuleList has already been removed by the caller.
-            let payload: String
-            if remoteContentAllowed {
-                let override = "<style>img[src^=\"http\"], img[src^=\"https\"] { display: inline !important; }</style>"
-                if let headEnd = html.range(of: "</head>") {
-                    payload = html.replacingCharacters(in: headEnd, with: override + "</head>")
-                } else {
-                    payload = override + html
-                }
-            } else {
-                payload = html
-            }
-            webView.loadHTMLString(payload, baseURL: nil)
+            webView.loadHTMLString(html, baseURL: nil)
             lastLoadedHTML = html
             pendingHTML = nil
         }
@@ -375,7 +380,13 @@ private struct HTMLWebView: NSViewRepresentable {
                let url = navigationAction.request.url {
                 // The href is attacker-controlled email HTML. Only open web /
                 // mail schemes — never file://, custom schemes, etc.
-                ExternalLink.open(url)
+                if url.scheme == "about", url.fragment != nil {
+                    decisionHandler(.allow)
+                    return
+                }
+                if !ExternalLink.open(url) {
+                    parent.linkError = "This link could not be opened. Only web and email links are supported."
+                }
                 decisionHandler(.cancel)
                 return
             }
@@ -392,140 +403,32 @@ private struct HTMLWebView: NSViewRepresentable {
         }
     }
 
-    // ── HTML wrapping ────────────────────────────────────────────────────
-
-    /// Wrap raw email HTML with our style boilerplate + quote-collapse
-    /// transform. Called ONCE from `HTMLBodyView.init`, not from
-    /// `updateNSView`. `fileprivate` so the parent view's init can reach it.
-    ///
-    /// `img[src^="http"]` is hidden via CSS here as a second line of
-    /// defence on top of the WKContentRuleList — even if the rule list
-    /// fails to load in time, remote images don't flash into view. When
-    /// the user opts in via "Load remote content", the caller strips the
-    /// rule list AND injects a small style override at the bottom of the
-    /// DOM via evaluateJavaScript to re-enable display (see `flushPending`).
-    fileprivate static func wrap(_ body: String) -> String {
-        let prefersDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let fg = prefersDark ? "#f5f5f7" : "#1d1d1f"
-        let link = "#0a84ff"
-        let transformed = collapseQuotedText(body)
-        // Note: `html, body { overflow: hidden }` belt-and-braces with the
-        // outer SwiftUI height-binding so the WKWebView never tries to
-        // present its own scrollbar. The outer ScrollView is the only one.
-        return """
-        <!doctype html><html><head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-          html, body {
-            margin: 0;
-            padding: 0;
-            background: transparent !important;
-            color: \(fg);
-            font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
-            -webkit-font-smoothing: antialiased;
-            text-size-adjust: 100%;
-            overflow: hidden;
-          }
-          body { padding: 14px; box-sizing: border-box; overflow-wrap: anywhere; }
-          pre { white-space: pre-wrap; }
-          body > :first-child { margin-top: 0; }
-          a { color: \(link); }
-          img { max-width: 100%; height: auto; }
-          img[src^="http"], img[src^="https"] { display: none; }
-          table { max-width: 100% !important; }
-          body > table, body > div {
-            background: transparent !important;
-            background-color: transparent !important;
-          }
-          pre, code { font-family: ui-monospace, "SF Mono", monospace; }
-          blockquote {
-            border-left: 3px solid rgba(127,127,127,0.2);
-            padding-left: 12px;
-            color: rgba(127,127,127,0.9);
-            margin: 12px 0;
-          }
-          details.mm-quote { margin: 8px 0 12px 0; }
-          details.mm-quote > summary {
-            cursor: pointer;
-            display: inline-block;
-            padding: 2px 8px;
-            background: rgba(127,127,127,0.12);
-            border-radius: 10px;
-            font-size: 11px;
-            color: rgba(127,127,127,0.95);
-            list-style: none;
-            user-select: none;
-          }
-          details.mm-quote > summary::-webkit-details-marker { display: none; }
-          details.mm-quote[open] > summary { margin-bottom: 6px; }
-        </style></head>
-        <body>\(transformed)</body></html>
-        """
-    }
-
-    // ── Subclass: forward wheel events ──────────────────────────────────
-
-    /// WKWebView subclass whose `scrollWheel(with:)` forwards every wheel
-    /// event up the responder chain rather than handling it locally. We
-    /// size our SwiftUI parent's frame to the page's natural content
-    /// height (see `HTMLBodyView`), so the web view never has anything to
-    /// scroll — letting the parent SwiftUI ScrollView always win means the
-    /// user can scroll the entire reader regardless of where the cursor is.
+    /// Vertical wheel events belong to the conversation. Horizontal events
+    /// stay in WebKit so wide tables can scroll within their own document.
     final class PassthroughWebView: WKWebView {
         override func scrollWheel(with event: NSEvent) {
-            nextResponder?.scrollWheel(with: event)
+            if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+                super.scrollWheel(with: event)
+            } else {
+                nextResponder?.scrollWheel(with: event)
+            }
         }
     }
 
-    /// Wrap every top-level blockquote in a `<details>` so the quoted reply
-    /// history is collapsed by default. Pure HTML5 — no JS needed.
-    private static func collapseQuotedText(_ html: String) -> String {
-        let open = "<blockquote"
-        let close = "</blockquote>"
-        var out = ""
-        var idx = html.startIndex
-        var depth = 0
+    /// A flipped, clipped host aligns WebKit drawing with the SwiftUI scroll viewport.
+    final class HTMLHostView: NSView {
+        let webView: WKWebView
+        override var isFlipped: Bool { true }
 
-        while idx < html.endIndex {
-            if depth == 0, html[idx...].hasPrefix(open) {
-                out += "<details class=\"mm-quote\"><summary>Show quoted content</summary>"
-                depth = 1
-                let tagRange = html.range(of: ">", range: idx..<html.endIndex)
-                if let tagRange {
-                    out.append(contentsOf: html[idx..<tagRange.upperBound])
-                    idx = tagRange.upperBound
-                } else {
-                    out.append(contentsOf: html[idx...])
-                    break
-                }
-                continue
-            }
-            if html[idx...].hasPrefix(open) {
-                depth += 1
-                let tagRange = html.range(of: ">", range: idx..<html.endIndex)
-                if let tagRange {
-                    out.append(contentsOf: html[idx..<tagRange.upperBound])
-                    idx = tagRange.upperBound
-                } else {
-                    out.append(contentsOf: html[idx...])
-                    break
-                }
-                continue
-            }
-            if html[idx...].hasPrefix(close) {
-                out += close
-                idx = html.index(idx, offsetBy: close.count)
-                depth -= 1
-                if depth == 0 {
-                    out += "</details>"
-                }
-                if depth < 0 { depth = 0 }
-                continue
-            }
-            out.append(html[idx])
-            idx = html.index(after: idx)
+        init(webView: WKWebView) {
+            self.webView = webView
+            super.init(frame: .zero)
+            clipsToBounds = true
+            webView.frame = bounds
+            webView.autoresizingMask = [.width, .height]
+            addSubview(webView)
         }
-        return out
+
+        required init?(coder: NSCoder) { nil }
     }
 }

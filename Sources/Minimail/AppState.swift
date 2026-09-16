@@ -140,6 +140,11 @@ final class ReaderState {
     var isLoading: Bool = false
     var attachments: [Attachment] = []
     var attachmentsByMessageID: [Int64: [Attachment]] = [:]
+    var attachmentErrors: [Int64: String] = [:]
+    var attachmentDownloads: Set<String> = []
+    var inlineImages: [Int64: [String: String]] = [:]
+    var inlineImageErrors: [Int64: String] = [:]
+    var contentGeneration = UUID()
     var remoteContentCountsByMessageID: [Int64: Int] = [:]
     /// Task owning the currently-running fetch so we can cancel on navigation.
     var inflight: Task<Void, Never>?
@@ -198,7 +203,13 @@ final class ComposeState {
             .documentType: NSAttributedString.DocumentType.html,
             .characterEncoding: String.Encoding.utf8.rawValue,
         ]
-        guard let data = try? bodyAttributed.data(from: range, documentAttributes: attrs),
+        let export = NSMutableAttributedString(attributedString: bodyAttributed)
+        export.enumerateAttribute(.foregroundColor, in: range) { value, run, _ in
+            if let color = value as? NSColor, color == .labelColor || color == .textColor {
+                export.addAttribute(.foregroundColor, value: NSColor.black, range: run)
+            }
+        }
+        guard let data = try? export.data(from: range, documentAttributes: attrs),
               let html = String(data: data, encoding: .utf8) else {
             return nil
         }
@@ -211,14 +222,16 @@ final class ComposeState {
         var found = false
         let full = NSRange(location: 0, length: bodyAttributed.length)
         bodyAttributed.enumerateAttributes(in: full, options: []) { attrs, _, stop in
-            if attrs[.link] != nil { found = true; stop.pointee = true; return }
-            if attrs[.underlineStyle] != nil { found = true; stop.pointee = true; return }
-            if let font = attrs[.font] as? NSFont {
-                let traits = NSFontManager.shared.traits(of: font)
-                if traits.contains(.boldFontMask) || traits.contains(.italicFontMask) {
-                    found = true; stop.pointee = true; return
-                }
+            let plainKeys: Set<NSAttributedString.Key> = [.font, .foregroundColor, .paragraphStyle]
+            let extraKeys = Set(attrs.keys).subtracting(plainKeys)
+            if !extraKeys.isEmpty { found = true }
+            if let font = attrs[.font] as? NSFont, font != NSFont.systemFont(ofSize: 13) { found = true }
+            if let color = attrs[.foregroundColor] as? NSColor, color != .labelColor, color != .textColor {
+                found = true
             }
+            if let paragraph = attrs[.paragraphStyle] as? NSParagraphStyle,
+               !paragraph.isEqual(NSParagraphStyle.default) { found = true }
+            if found { stop.pointee = true }
         }
         return found
     }
@@ -743,23 +756,10 @@ final class AppState {
     /// Refresh cached reader-footer values when navigating to a message.
     /// Called once per `open()` — avoids per-render `inbox.visible()` filter
     /// and per-render `NSRegularExpression` compile in the footer.
-    private static let trackingRegex = try! NSRegularExpression(pattern: #"(?i)(?:src|href|srcset)\s*=\s*["']?(?:https?:)?//"#)
-
     private func updateReaderDerived(for message: Message) {
         let list = inbox.visible()
-        if let idx = list.firstIndex(where: { $0.id == message.id }) {
-            reader.positionLabel = "\(idx + 1) of \(list.count)"
-        } else {
-            reader.positionLabel = nil
-        }
-        let remoteContentCount: Int
-        if let html = message.html_body, !html.isEmpty {
-            let range = NSRange(html.startIndex..., in: html)
-            remoteContentCount = Self.trackingRegex.numberOfMatches(in: html, range: range)
-        } else {
-            remoteContentCount = 0
-        }
-        reader.remoteContentCountsByMessageID[message.id] = remoteContentCount
+        reader.positionLabel = list.firstIndex(where: { $0.id == message.id }).map { "\($0 + 1) of \(list.count)" }
+        reader.remoteContentCountsByMessageID[message.id] = EmailHTML.hasRemoteResources(message.html_body ?? "") ? 1 : 0
     }
 
     private func loadFullMessage(id: Int64) {
@@ -768,6 +768,10 @@ final class AppState {
         reader.isLoading = true
         reader.attachments = []
         reader.attachmentsByMessageID = [:]
+        reader.attachmentErrors = [:]
+        reader.inlineImages = [:]
+        reader.inlineImageErrors = [:]
+        reader.contentGeneration = UUID()
         reader.remoteContentCountsByMessageID = [:]
         reader.thread = []
         reader.expandedThreadIDs = [id]
@@ -806,30 +810,20 @@ final class AppState {
 
             async let attachmentsTask = self.cli.listAttachments(messageID: id)
             async let threadTask = self.cli.readThread(id: id)
-            let attachments = (try? await attachmentsTask) ?? []
-            let thread = (try? await threadTask) ?? []
-            var attachmentMap = [id: attachments]
-            let siblingAttachmentIDs = thread
-                .filter { $0.id != id && $0.has_attachments == true }
-                .map(\.id)
-            if !siblingAttachmentIDs.isEmpty {
-                let cli = self.cli
-                await withTaskGroup(of: (Int64, [Attachment]).self) { group in
-                    for messageID in siblingAttachmentIDs {
-                        group.addTask {
-                            let list = (try? await cli.listAttachments(messageID: messageID)) ?? []
-                            return (messageID, list)
-                        }
-                    }
-                    for await (messageID, list) in group {
-                        attachmentMap[messageID] = list
-                    }
-                }
+            let attachments: [Attachment]
+            do { attachments = try await attachmentsTask }
+            catch {
+                if Task.isCancelled { return }
+                attachments = []
+                self.reader.attachmentErrors[id] = ActionableError.classify(error).message
             }
+            let thread = (try? await threadTask) ?? []
             if Task.isCancelled { return }
 
             self.reader.attachments = attachments
-            self.reader.attachmentsByMessageID = attachmentMap
+            // Sibling files load when their message is expanded, so a long
+            // conversation never delays this message's body or inline images.
+            self.reader.attachmentsByMessageID = [id: attachments]
             if thread.count > 1 {
                 // Splice the full-body message back at its position — the
                 // thread endpoint returns lightweight summaries without
@@ -842,6 +836,7 @@ final class AppState {
                 }
                 self.reader.thread = hydrated
             }
+            if let detail = self.reader.loaded { await self.loadInlineImages(for: detail) }
         }
         reader.inflight = task
     }
@@ -850,13 +845,18 @@ final class AppState {
     func expandThreadMessage(_ id: Int64) async {
         guard !reader.expandedThreadIDs.contains(id) else { return }
         let route = router.currentView
+        let generation = reader.contentGeneration
         reader.expandedThreadIDs.insert(id)
         do {
             let full = try await cli.readMessage(id: id, markRead: false)
-            guard router.currentView == route, let index = reader.thread.firstIndex(where: { $0.id == id }) else { return }
+            guard router.currentView == route else { return }
+            await reloadAttachments(messageID: id)
+            guard router.currentView == route, reader.contentGeneration == generation,
+                  let index = reader.thread.firstIndex(where: { $0.id == id }) else { return }
             reader.thread[index] = full
             reader.loaded = full
             updateReaderDerived(for: full)
+            await loadInlineImages(for: full)
             if full.isUnread { await markRead(message: full) }
         } catch {
             guard router.currentView == route else { return }
@@ -1111,9 +1111,11 @@ final class AppState {
         router.currentView = destination
     }
 
-    func openOutbox() async {
+    func openOutbox() async { await openSettings(section: "outbox") }
+
+    func openSettings(section: String) async {
         guard await prepareToLeaveCompose() else { return }
-        router.settingsSection = "outbox"
+        router.settingsSection = section
         router.currentView = .settings
     }
 
@@ -1292,18 +1294,93 @@ final class AppState {
 
     // ── Attachments ───────────────────────────────────────────────────────
 
-    func downloadAttachment(_ attachment: Attachment, messageID: Int64, to destination: URL) async {
-        do {
-            try await cli.downloadAttachment(messageID: messageID, attachmentID: attachment.id, to: destination)
-            NSWorkspace.shared.activateFileViewerSelecting([destination])
-        } catch {
-            // Route through the shared classifier so a rate-limit / auth
-            // error from the underlying download surfaces as the same
-            // actionable case the rest of the app already handles, rather
-            // than a bare stderr blob.
-            let actionable = ActionableError.classify(error)
-            inbox.error = .other("Attachment download failed: \(actionable.message)")
+    func loadInlineImages(for message: Message) async {
+        guard let html = message.html_body, html.range(of: "cid:", options: .caseInsensitive) != nil else { return }
+        let generation = reader.contentGeneration
+        let attachments = reader.attachments(for: message.id).filter { $0.content_id != nil }
+        var images: [String: String] = [:]
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Minimail-Inline-\(UUID().uuidString)")
+        let batch = beginAttachmentExportBatch()
+        defer {
+            endAttachmentExportBatch(batch)
+            try? FileManager.default.removeItem(at: folder)
         }
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var remainingBytes = 25 * 1024 * 1024
+            for attachment in attachments {
+                guard !Task.isCancelled, reader.contentGeneration == generation else { return }
+                guard let cid = attachment.content_id,
+                      let mime = attachment.content_type?.lowercased(),
+                      EmailHTML.inlineImageTypes.contains(mime),
+                      EmailHTML.referencesContentID(cid, in: html) else { continue }
+                if let size = attachment.size, size > remainingBytes { continue }
+                let file = folder.appendingPathComponent(UUID().uuidString)
+                try await exportAttachment(attachment, messageID: message.id, to: file)
+                let budget = remainingBytes
+                let data = try await Task.detached {
+                    let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                    guard size <= budget else { throw EmailCLI.CLIError.badInput("Embedded images exceed the 25 MB preview limit.") }
+                    return try Data(contentsOf: file)
+                }.value
+                remainingBytes -= data.count
+                images[EmailHTML.normalizedContentID(cid)] = "data:\(mime);base64,\(data.base64EncodedString())"
+            }
+            guard !Task.isCancelled, reader.contentGeneration == generation else { return }
+            reader.inlineImages[message.id] = images
+            reader.inlineImageErrors[message.id] = EmailHTML.unresolvedContentIDs(in: html, images: images).isEmpty
+                ? nil : "Some embedded images are unavailable. You can still open the message's attachments."
+        } catch {
+            guard !Task.isCancelled, reader.contentGeneration == generation else { return }
+            reader.inlineImages[message.id] = images
+            reader.inlineImageErrors[message.id] = "Embedded images: " + ActionableError.classify(error).message
+        }
+    }
+
+    func reloadAttachments(messageID: Int64) async {
+        let route = router.currentView
+        do {
+            let attachments = try await cli.listAttachments(messageID: messageID)
+            guard router.currentView == route else { return }
+            reader.attachmentsByMessageID[messageID] = attachments
+            reader.attachmentErrors[messageID] = nil
+        } catch {
+            guard router.currentView == route else { return }
+            reader.attachmentErrors[messageID] = ActionableError.classify(error).message
+        }
+    }
+
+    private var attachmentExportWaiters: [CheckedContinuation<Void, Never>] = []
+    private var attachmentExportBatches: Set<UUID> = []
+
+    func beginAttachmentExportBatch() -> UUID {
+        let token = UUID()
+        attachmentExportBatches.insert(token)
+        return token
+    }
+
+    func endAttachmentExportBatch(_ token: UUID) {
+        attachmentExportBatches.remove(token)
+        resumeAttachmentExportWaiters()
+    }
+
+    private func resumeAttachmentExportWaiters() {
+        guard reader.attachmentDownloads.isEmpty, attachmentExportBatches.isEmpty else { return }
+        let waiters = attachmentExportWaiters
+        attachmentExportWaiters = []
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func exportAttachment(_ attachment: Attachment, messageID: Int64, to destination: URL) async throws {
+        let key = "\(messageID):\(attachment.id)"
+        guard reader.attachmentDownloads.insert(key).inserted else {
+            throw EmailCLI.CLIError.badInput("This attachment is already downloading.")
+        }
+        defer {
+            reader.attachmentDownloads.remove(key)
+            resumeAttachmentExportWaiters()
+        }
+        try await cli.downloadAttachment(messageID: messageID, attachmentID: attachment.id, to: destination)
     }
 
     // ── Drafts ───────────────────────────────────────────────────────────
@@ -1632,7 +1709,12 @@ final class AppState {
 
     private var forwardAttachmentTask: Task<Void, Never>?
 
-    func waitForAttachmentDownloads() async { await forwardAttachmentTask?.value }
+    func waitForAttachmentDownloads() async {
+        await forwardAttachmentTask?.value
+        if !reader.attachmentDownloads.isEmpty || !attachmentExportBatches.isEmpty {
+            await withCheckedContinuation { attachmentExportWaiters.append($0) }
+        }
+    }
 
     /// Download every attachment on the source message into a temp directory
     /// and append the file URLs to `compose.attachments`. Mirrors what Apple

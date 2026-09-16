@@ -4,6 +4,7 @@ import ServiceManagement
 
 /// Keys used for persisted settings. UserDefaults + @AppStorage binds cleanly.
 enum SettingsKey {
+    static let compactSidebar = "minimail.compactSidebar"
     static let syncIntervalSeconds = "minimail.syncIntervalSeconds"
     /// Per-account mute flag (bool) keyed `minimail.mute.<email>`.
     static func muteKey(for email: String) -> String {
@@ -82,8 +83,10 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().opacity(0.25)
+            if !state.router.isExpanded {
+                header
+                Divider().opacity(0.25)
+            }
             if let error = state.inbox.error {
                 ErrorBanner(error: error)
             }
@@ -119,11 +122,17 @@ struct SettingsView: View {
             }
             .frame(maxHeight: .infinity, alignment: .top)
         }
+        .onChange(of: section) { _, value in
+            state.router.settingsSection = value.rawValue.lowercased()
+        }
+        .onExitCommand {
+            state.router.currentView = .inbox
+        }
         .onChange(of: initialSection) { _, value in
-            if value == "outbox" { section = .outbox }
+            if let selected = Section.allCases.first(where: { $0.rawValue.lowercased() == value }) { section = selected }
         }
         .onAppear {
-            if initialSection == "outbox" { section = .outbox }
+            if let selected = Section.allCases.first(where: { $0.rawValue.lowercased() == initialSection }) { section = selected }
             loadSignatureForCurrentAccount()
             Task { await loadProfiles() }
             loadLaunchAtLoginState()
@@ -509,13 +518,18 @@ struct SettingsView: View {
 
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionTitle("Profiles", subtitle: "Each profile holds a Resend API key. New keys are tested before replacing a working key.")
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Profiles").font(.system(size: 12, weight: .semibold))
+                Text("Each profile holds a Resend API key. New keys are tested before replacing a working key.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
             if availableProfiles.isEmpty {
                 Text("No profiles configured")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else {
-                HStack(spacing: 8) {
+                HStack(alignment: .bottom, spacing: 8) {
                     Picker("", selection: Binding(
                         get: { apiKeyProfile ?? availableProfiles.first ?? "" },
                         set: { apiKeyProfile = $0; apiKeyStatus = nil; apiKeyDraft = "" }
@@ -528,9 +542,14 @@ struct SettingsView: View {
                     .frame(width: 140)
                     .disabled(apiKeySaving)
 
-                    SecureField("re_…", text: $apiKeyDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Replacement API key")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        SecureField("re_…", text: $apiKeyDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                    }
                 }
 
                 HStack(spacing: 8) {

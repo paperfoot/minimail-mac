@@ -132,6 +132,8 @@ struct Attachment: Decodable, Sendable, Identifiable, Hashable {
     let content_type: String?
     let size: Int?
     let downloaded: Bool?
+    var content_id: String? = nil
+    var content_disposition: String? = nil
 }
 
 struct Draft: Decodable, Sendable, Identifiable, Hashable {

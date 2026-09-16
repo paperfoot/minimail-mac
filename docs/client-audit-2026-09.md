@@ -15,7 +15,7 @@ The original client contained 24 Swift source files. The review covered their fu
 
 [Apple's window guidance](https://developer.apple.com/design/human-interface-guidelines/windows), [Mailspring](https://github.com/Foundry376/Mailspring), and [Geary](https://wiki.gnome.org/Apps/Geary) informed the structure: mailboxes, message list, reading/composing pane; visible message actions; and restrained chrome. [Geary's test checklist](https://wiki.gnome.org/Apps%282f%29Geary%282f%29TestChecklist.html) informed the interaction checks.
 
-Minimail keeps its quick 420 × 580 menu-bar view. Expand mounts the same state in a resizable AppKit window with a SwiftUI navigation split view. Only one presentation owns editors and shortcuts at a time. The full window appears in the Dock; closing it returns the app to menu-bar operation. Native list selection, sidebar material, titlebar controls, menus, and text editing provide the macOS behavior. Glass remains on floating controls and status surfaces.
+Minimail keeps its quick 420 × 580 menu-bar view. Expand mounts the same state in a resizable AppKit window with persistent mailbox navigation and a native split between messages and the reader. Only one presentation owns editors and shortcuts at a time. The full window appears in the Dock; closing it returns the app to menu-bar operation. Native list selection, sidebar material, titlebar controls, menus, and text editing provide the macOS behavior. Glass remains on floating controls and status surfaces.
 
 ## Findings addressed
 
@@ -81,6 +81,37 @@ Validation results:
 - Mouse/keyboard automation could not reliably focus SwiftUI controls in this environment. End-to-end typing, keyboard selection, and account CRUD dialogs therefore remain manual acceptance checks; they are not claimed as completed UI tests. Their state/CLI boundaries have automated coverage.
 
 The v0.7.6 backend release publishes Apple Silicon and Intel archives with checksums. Client signing, notarization, and installed-bundle verification are tracked separately from these test results.
+
+## Second pass — 0.8.1
+
+The second pass reread the compact inbox, full-window navigation, settings, compose/editor bridge, reader/WebKit implementation, attachment operations, and their state and CLI contracts. Independent agents inventoried rendering and compose/navigation paths, implemented specified backend fixes and regression tests, and reviewed native captures. Layout and product decisions remained with the lead review.
+
+The comparison focused on [Geary's conversation-oriented interface](https://wiki.gnome.org/Apps/Geary), [Mailspring's desktop mail features](https://github.com/Foundry376/Mailspring), and [Thunderbird's attachment preview/save workflow](https://support.mozilla.org/en-US/kb/how-use-attachments). The resulting split keeps triage and quick replies in the menu bar; the full window owns persistent mailbox navigation, richer composition controls, and account/settings work.
+
+| Area | Change |
+|---|---|
+| Mini inbox | One compact header with mailbox/account choice, search, compose, expand, and overflow. Search appears on demand. Removed redundant toolbar, row avatars, and permanently reserved hover-action space. Improved date and preview contrast. |
+| Full window | Unified-account rows identify the mailbox. Settings and account management use the full window instead of squeezing into the reader column; section links now open the requested section. Persistent navigation compacts to icons, preserving accounts, all folders, Outbox, and Settings. The leading sidebar toggle stays fixed across both modes and Settings. |
+| Reader hierarchy | Subject appears once. Sender details disclose full addresses, recipients, date, and account. Conversation history and multiple attachments start collapsed, leaving the message body visible at the minimum window size. |
+| Attachments | Native Quick Look, Save As, Save All, progress, and visible retry/error states. Save All reserves unique filenames without overwriting unrelated files and quit waits for the complete batch. |
+| Attachment cache | Exported files are copies of a canonical private cache. Editing or deleting an exported file no longer corrupts subsequent downloads. Legacy cache paths migrate when used, and missing pointers repair themselves. |
+| Embedded images | Preserve provider content IDs/disposition in the CLI's existing raw metadata. Resolve supported CID bitmap images locally, separately from remote-image consent. Preview budget is 25 MB per message; unavailable assets remain accessible through attachment actions. [Resend's attachment contract](https://resend.com/docs/api-reference/emails/retrieve-received-email-attachment) documents these fields. |
+| HTML privacy and fidelity | Validated the actual WebKit content-blocking rule list; remote requests stay blocked until opted in. Preserve paired sender foreground/background colors, collapse quoted blocks through the DOM, and allow horizontal access to wide tables. |
+| Long-message hosting | A clipped native host keeps WebKit geometry within the reader while document height follows content changes. Early inactive-window captures were inconclusive; raised native-window and compact captures passed with the long body, paired banner colors, inline CID image, and wide table visible. |
+| Compose | Compact formatting is disclosed on demand; full-window formatting stays visible. Sender changes and compose generations reset local field visibility correctly. Save & Close retains failed drafts. One send-review dialog includes every detected warning. |
+| Rich text | Preserve fonts, colors, alignment, strikethrough, and links in HTML export, normalize adaptive text color for a light email canvas, and apply list markers to each selected paragraph without destroying formatting. |
+
+New regression coverage includes current and legacy attachment metadata, percent-encoded CID matching, multiple and missing CID references, actual WebKit rule compilation, remote-resource detection, safe filenames and duplicate export names, quit/export batch lifetime, rich HTML serialization, and attributed list edits.
+
+### Sidebar and native interaction review
+
+The follow-up research used [Apple's macOS design guidance](https://developer.apple.com/videos/play/wwdc2019/809/) on stable toolbar actions and sidebar selection, [Apple's toolbar guidance](https://developer.apple.com/design/human-interface-guidelines/toolbars), [Thunderbird's collapsed-navigation discussion](https://bugzilla.mozilla.org/show_bug.cgi?id=1665511), and [Mailspring user feedback about discovering sidebar controls](https://community.getmailspring.com/t/hide-show-contact-sidebar/296). These sources support persistent navigation, a stable leading toggle, and identifiable actions; the particular icon-rail layout is Minimail's design decision.
+
+Native captures reproduced the old toggle moving from x227 to x919 as the sidebar disappeared. The replacement keeps its center at x104 in both states. Compaction preserves the account menu, seven mailbox destinations, Outbox, and Settings, and gives the reader more width. Labels, help text, selection state, the View menu, and Control-Command-S expose the behavior. Settings retains the same navigation and toolbar; its duplicate content heading was removed and replacement API keys now have an explicit label.
+
+Final native checks passed for the expanded and compact sidebars, account-manager navigation, Settings, the compact inbox, HTML reading, rich compose, and full-to-compact draft preservation. Native Quick Look displayed the fixture attachment. Save All exported byte-identical copies while preserving pre-existing files and choosing numbered names. All 72 Swift tests across 11 suites and all 16 build/embedded-helper checks passed with email-cli 0.7.7; the CLI's 71 Rust tests passed separately.
+
+Final release checks and native acceptance results are recorded in [the 0.8.1 receipt](release/0.8.1.md).
 
 ## Remaining product scope
 

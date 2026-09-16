@@ -8,18 +8,26 @@ struct ReaderView: View {
     /// navigates to a different root message; within a thread, each message
     /// must be explicitly allowed.
     @State private var remoteContentAllowedIDs: Set<Int64> = []
+    @State private var plainTextIDs: Set<Int64> = []
+    @State private var detailIDs: Set<Int64> = []
+    @State private var showsConversation = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.3)
+            if let error = state.inbox.error { ErrorBanner(error: error) }
             content
+            Divider().opacity(0.2)
             footer
         }
         // Root-message reset: the moment the user j/k's or taps another
         // inbox row, drop allowances so the next thread starts blocked.
         .onChange(of: messageID) { _, _ in
             remoteContentAllowedIDs.removeAll()
+            plainTextIDs.removeAll()
+            detailIDs.removeAll()
+            showsConversation = false
         }
     }
 
@@ -33,37 +41,11 @@ struct ReaderView: View {
             .help("Back to inbox (esc)")
             .accessibilityLabel("Back to inbox")
 
-            Text(state.reader.loaded?.displaySubject ?? "Loading…")
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-
+            Text(state.router.isExpanded ? "Message" : state.inbox.currentFolder.rawValue)
+                .font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
             Spacer()
-
+            if !state.router.isExpanded { CompactExpandButton() }
             if let msg = state.reader.loaded {
-                Button { Task { await state.composeReply(to: msg) } } label: {
-                    Image(systemName: "arrowshape.turn.up.left")
-                }
-                .buttonStyle(IconButtonStyle())
-                .help("Reply (⌘R)")
-                .accessibilityLabel("Reply")
-                .keyboardShortcut("r", modifiers: .command)
-
-                Button { Task { await state.composeReply(to: msg, replyAll: true) } } label: {
-                    Image(systemName: "arrowshape.turn.up.left.2")
-                }
-                .buttonStyle(IconButtonStyle())
-                .help("Reply All (⌘⇧R)")
-                .accessibilityLabel("Reply all")
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-
-                Button { Task { await state.composeReply(to: msg, forward: true) } } label: {
-                    Image(systemName: "arrowshape.turn.up.right")
-                }
-                .buttonStyle(IconButtonStyle())
-                .help("Forward (⌘⇧F)")
-                .accessibilityLabel("Forward")
-                .keyboardShortcut("f", modifiers: [.command, .shift])
-
                 Button {
                     Task {
                         if msg.isArchived { await state.unarchive(message: msg) }
@@ -91,13 +73,21 @@ struct ReaderView: View {
                 .keyboardShortcut("l", modifiers: [.command, .shift])
 
                 Menu {
-                    Button("Later today (4h)") { Task { await state.snooze(msg, until: "4h") } }
-                    Button("Tonight") { Task { await state.snooze(msg, until: "tonight") } }
-                    Button("Tomorrow") { Task { await state.snooze(msg, until: "tomorrow") } }
-                    Button("Next week") { Task { await state.snooze(msg, until: "next-week") } }
-                    if msg.isSnoozed {
-                        Divider()
-                        Button("Unsnooze") { Task { await state.unsnooze(msg) } }
+                    Button("Reply") { Task { await state.composeReply(to: msg) } }.keyboardShortcut("r", modifiers: .command)
+                    Button("Reply All") { Task { await state.composeReply(to: msg, replyAll: true) } }.keyboardShortcut("r", modifiers: [.command, .shift])
+                    Button("Forward") { Task { await state.composeReply(to: msg, forward: true) } }.keyboardShortcut("f", modifiers: [.command, .shift])
+                    Divider()
+                    Menu("Snooze") {
+                        Button("Later Today (4h)") { Task { await state.snooze(msg, until: "4h") } }
+                        Button("Tonight") { Task { await state.snooze(msg, until: "tonight") } }
+                        Button("Tomorrow") { Task { await state.snooze(msg, until: "tomorrow") } }
+                        Button("Next Week") { Task { await state.snooze(msg, until: "next-week") } }
+                    }
+                    if msg.isSnoozed { Button("Unsnooze") { Task { await state.unsnooze(msg) } } }
+                    if msg.html_body?.isEmpty == false, msg.text_body?.isEmpty == false {
+                        Button(plainTextIDs.contains(msg.id) ? "Show Original Formatting" : "Show Plain Text") {
+                            if !plainTextIDs.insert(msg.id).inserted { plainTextIDs.remove(msg.id) }
+                        }
                     }
                     Divider()
                     if msg.direction == "received" {
@@ -191,7 +181,7 @@ struct ReaderView: View {
                         singleMessage(msg)
                     }
                 }
-            }
+            }.id(messageID)
         } else if let err = state.reader.error {
             VStack(spacing: 10) {
                 Image(systemName: "exclamationmark.circle").font(.system(size: 28)).opacity(0.5)
@@ -217,11 +207,11 @@ struct ReaderView: View {
             Image(systemName: "envelope.arrow.triangle.branch")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.accentColor)
-            Text("Mailing-list mail — one click to unsubscribe")
+            Text("Mailing list")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Spacer()
-            Button("Unsubscribe") {
+            Button("Unsubscribe…") {
                 Task { await state.unsubscribeFrom(msg) }
             }
             .controlSize(.small)
@@ -246,11 +236,8 @@ struct ReaderView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         Divider().opacity(0.3)
+        attachmentSection(for: msg)
         body(for: msg)
-        let attachments = state.reader.attachments(for: msg.id)
-        if !attachments.isEmpty {
-            attachmentsBar(messageID: msg.id, attachments: attachments)
-        }
     }
 
     /// Conservative phishing heuristic: when the sender's display name
@@ -297,22 +284,20 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func threadStack(focusedID: Int64) -> some View {
-        // Banner — simple count readout to orient the user.
-        HStack(spacing: 6) {
-            Image(systemName: "text.bubble")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-            Text("\(state.reader.thread.count) messages in this thread")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-            Spacer()
-        }
+        Button { showsConversation.toggle() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "text.bubble")
+                Text(showsConversation ? "Hide conversation" : "Show conversation (\(state.reader.thread.count) messages)")
+                Spacer()
+                Image(systemName: showsConversation ? "chevron.up" : "chevron.down")
+            }.font(.system(size: 11)).foregroundStyle(.secondary).contentShape(Rectangle())
+        }.buttonStyle(.plain)
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
         .background(Color.primary.opacity(0.03))
         Divider().opacity(0.2)
 
-        ForEach(state.reader.thread) { m in
+        ForEach(state.reader.thread.filter { showsConversation || $0.id == focusedID }) { m in
             let expanded = state.reader.expandedThreadIDs.contains(m.id) || m.id == focusedID
             if expanded {
                 if m.hasUnsubscribeLink {
@@ -324,25 +309,17 @@ struct ReaderView: View {
                     Divider().opacity(0.2)
                 }
                 fromRow(m)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        state.focusThreadMessage(m.id)
-                    }
+
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                 Divider().opacity(0.25)
+                attachmentSection(for: m)
                 body(for: m)
-                let attachments = state.reader.attachments(for: m.id)
-                if !attachments.isEmpty {
-                    attachmentsBar(messageID: m.id, attachments: attachments)
-                }
                 Divider().opacity(0.2)
             } else {
-                CollapsedThreadRow(message: m)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        Task { await state.expandThreadMessage(m.id) }
-                    }
+                Button { Task { await state.expandThreadMessage(m.id) } } label: {
+                    CollapsedThreadRow(message: m).contentShape(Rectangle())
+                }.buttonStyle(.plain)
                 Divider().opacity(0.15)
             }
         }
@@ -350,7 +327,7 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func body(for msg: Message) -> some View {
-        if let html = msg.html_body, !html.isEmpty {
+        if let html = msg.html_body, !html.isEmpty, !plainTextIDs.contains(msg.id) {
             // HTMLBodyView self-sizes to its content height now — don't add
             // a fixed `.frame(minHeight:)` here or it caps short messages
             // and reintroduces the inner-scrollbar problem we just fixed.
@@ -358,8 +335,20 @@ struct ReaderView: View {
             if state.reader.remoteContentCount(for: msg.id) > 0 {
                 remoteContentControl(for: msg, isAllowed: remoteContentAllowed)
             }
+            if let error = state.reader.inlineImageErrors[msg.id] {
+                HStack(alignment: .top) {
+                    Text(error).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Retry") {
+                        Task {
+                            await state.reloadAttachments(messageID: msg.id)
+                            await state.loadInlineImages(for: msg)
+                        }
+                    }
+                }.padding(12)
+            }
             HTMLBodyView(
-                html: html,
+                html: EmailHTML.resolvingInlineImages(in: html, images: state.reader.inlineImages[msg.id] ?? [:]),
                 remoteContentAllowed: remoteContentAllowed
             )
         } else if let text = msg.text_body, !text.isEmpty {
@@ -407,159 +396,64 @@ struct ReaderView: View {
         .background(Color.primary.opacity(0.03))
     }
 
-    private func attachmentsBar(messageID: Int64, attachments: [Attachment]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 4) {
-                Image(systemName: "paperclip")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                Text("\(attachments.count) attachment\(attachments.count == 1 ? "" : "s")")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
-            FlowLayout(spacing: 6) {
-                ForEach(attachments) { att in
-                    AttachmentChip(attachment: att) {
-                        saveAttachment(att, messageID: messageID)
-                    }
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
-    private func saveAttachment(_ attachment: Attachment, messageID: Int64) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = attachment.filename ?? "attachment"
-        panel.canCreateDirectories = true
-        if panel.runModal() == .OK, let url = panel.url {
-            Task { await state.downloadAttachment(attachment, messageID: messageID, to: url) }
+    @ViewBuilder
+    private func attachmentSection(for message: Message) -> some View {
+        let attachments = state.reader.attachments(for: message.id)
+        if !attachments.isEmpty { AttachmentShelf(messageID: message.id, attachments: attachments) }
+        if let error = state.reader.attachmentErrors[message.id] {
+            HStack(alignment: .top) {
+                Label("Attachments: " + error, systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Retry") { Task { await state.reloadAttachments(messageID: message.id) } }
+            }.padding(.horizontal, 16).padding(.vertical, 8)
         }
     }
 
     private func fromRow(_ msg: Message) -> some View {
         let parts = msg.fromParts
-        let toList = msg.to ?? []
-        let ccList = msg.cc ?? []
-        let bccList = msg.bcc ?? []
-        let replyToList = msg.reply_to ?? []
-        let isSent = msg.direction == "sent"
-        // Reply-To only matters when it actually redirects replies to a
-        // different mailbox than From. If they match, the header is
-        // redundant noise; if they differ, the user MUST see it or they'll
-        // think they're replying to the sender and silently hit a list /
-        // bot / different person.
-        let replyRedirect: [String]? = {
-            guard !replyToList.isEmpty else { return nil }
-            let fromKey = parts.email.lowercased()
-            let allMatchFrom = replyToList.allSatisfy { $0.emailAddressPart.lowercased() == fromKey }
-            return allMatchFrom ? nil : replyToList
-        }()
-        return HStack(alignment: .top, spacing: 10) {
-            AccountAvatar(email: parts.email)
-                .scaleEffect(1.4)
-                .frame(width: 30, height: 30)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(parts.name ?? parts.email)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                if parts.name != nil {
-                    Text(parts.email)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Text("to " + toList.joined(separator: ", "))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .help(toList.joined(separator: ", "))
-                // CC must be visible — without it the user can't tell that
-                // a "Reply" (vs "Reply All") will drop everyone else off
-                // the thread. The bug that motivated this row: a single-
-                // recipient reply silently ghosted the other party who'd
-                // been CC'd on the original message.
-                if !ccList.isEmpty {
-                    Text("cc " + ccList.joined(separator: ", "))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .help(ccList.joined(separator: ", "))
-                }
-                // Bcc is only meaningful on outbound mail — the protocol
-                // strips Bcc from headers before delivery, so received
-                // messages will never carry it (only the sender knows).
-                if isSent, !bccList.isEmpty {
-                    Text("bcc " + bccList.joined(separator: ", "))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .help(bccList.joined(separator: ", "))
-                }
-                // Reply-To redirect — visually distinct so the user can't
-                // miss that "Reply" will land somewhere other than the
-                // sender they see at the top of this card. Mailing lists,
-                // ticketing systems, and shared-inbox tools rely on this
-                // header, and clients that hide it silently send confidential
-                // replies to the wrong audience.
-                if let redirect = replyRedirect {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrowshape.turn.up.left.circle.fill")
-                            .font(.system(size: 10))
-                        Text("Replies go to " + redirect.joined(separator: ", "))
-                            .lineLimit(1)
+        let expanded = detailIDs.contains(msg.id)
+        let to = msg.to ?? []
+        let cc = msg.cc ?? []
+        let redirect = (msg.reply_to ?? []).filter { $0.emailAddressPart.lowercased() != parts.email.lowercased() }
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                state.focusThreadMessage(msg.id)
+                if !detailIDs.insert(msg.id).inserted { detailIDs.remove(msg.id) }
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(parts.name ?? parts.email).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text(DateFormat.inboxList(msg.created_at)).font(.system(size: 11)).foregroundStyle(.secondary)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 9)).foregroundStyle(.secondary)
                     }
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.orange)
-                    .help(redirect.joined(separator: ", "))
-                }
+                    Text("To: " + to.map(\.emailAddressPart).joined(separator: ", ") + (cc.isEmpty ? "" : " · \(cc.count) Cc"))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain).help(expanded ? "Hide message details" : "Show sender and recipient details")
+            if !redirect.isEmpty {
+                Text("Replies to " + redirect.joined(separator: ", "))
+                    .font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(DateFormat.readerHeader(msg.created_at))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                // "to me" vs "cc me" vs "bcc me" — single-glance signal of
-                // how the user got this message. Lets them judge whether
-                // they're the primary audience or one of many; on a long
-                // list-mail an inbox-zero pass can skip "cc me" faster.
-                if !isSent, let role = recipientRole(of: msg) {
-                    Text(role)
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(
-                            Capsule().fill(Color.primary.opacity(0.08))
-                        )
-                }
-                // In multi-account mode, which inbox actually received this
-                // message — otherwise indistinguishable from another account
-                // when the user reads via the unified All-Accounts view.
-                if state.session.accounts.count > 1 {
-                    Text(msg.account_email)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .help("Received at " + msg.account_email)
-                }
+            if expanded {
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                    detailRow("From", value: msg.from_addr)
+                    detailRow("To", value: to.joined(separator: ", "))
+                    if !cc.isEmpty { detailRow("Cc", value: cc.joined(separator: ", ")) }
+                    if msg.direction == "sent", let bcc = msg.bcc, !bcc.isEmpty { detailRow("Bcc", value: bcc.joined(separator: ", ")) }
+                    detailRow("Date", value: DateFormat.readerHeader(msg.created_at))
+                    if state.session.accounts.count > 1 { detailRow("Account", value: msg.account_email) }
+                }.font(.system(size: 11)).padding(.top, 4).textSelection(.enabled)
             }
-        }
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// "to me" / "cc me" — only emitted for received mail and only when the
-    /// receiving account is actually addressed. nil falls through to "you got
-    /// this via Bcc / mailing list / forwarded send" without a tag (showing
-    /// "bcc me" on every newsletter would be noise).
-    private func recipientRole(of msg: Message) -> String? {
-        let me = msg.account_email.lowercased()
-        let inTo = (msg.to ?? []).contains { $0.emailAddressPart.lowercased() == me }
-        if inTo { return "to me" }
-        let inCc = (msg.cc ?? []).contains { $0.emailAddressPart.lowercased() == me }
-        if inCc { return "cc me" }
-        return nil
+    private func detailRow(_ label: String, value: String) -> some View {
+        GridRow(alignment: .top) {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private struct CollapsedThreadRow: View {

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Sheet listing every keyboard shortcut Minimail responds to. Invoked by
-/// pressing `?` anywhere (handled on RootView). The list is grouped into the
+/// pressing `⌘/` anywhere (handled on RootView). The list is grouped into the
 /// three contexts users think about: moving around, reading, composing.
 struct KeyboardHelpView: View {
     @Binding var isPresented: Bool
@@ -33,6 +33,7 @@ struct KeyboardHelpView: View {
                         ("↩", "Open selected message"),
                         ("⎋", "Back to inbox / close sheet"),
                         ("⌘ ,", "Settings"),
+                        ("⌃ ⌘ S", "Compact / expand sidebar"),
                         ("⌘ /", "This help"),
                     ])
                     // Account quick-switcher shortcuts — ⌘0 for unified

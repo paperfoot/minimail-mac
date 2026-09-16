@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     let appState = AppState()
@@ -85,12 +85,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             MinimailNotifier.shared.seed(receivedIDs)
             refreshStatusTitle()
             startPollingForNewMail()
+            #if DEBUG
+            await configureQAPresentation()
+            #endif
         }
 
         // Re-sync the menu bar title whenever the unread count changes.
         // withObservationTracking is one-shot; re-register inside onChange.
         observeUnread()
     }
+
+    #if DEBUG
+    /// Deterministic entry points for the isolated offline fixture bundle.
+    /// They do not exist in release builds or affect the real app's data.
+    private func configureQAPresentation() async {
+        guard Bundle.main.bundleIdentifier == "ai.paperfoot.minimail.qa" else { return }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let flag = arguments.firstIndex(of: "--qa-view"), arguments.indices.contains(flag + 1) else { return }
+        pollTimer?.invalidate()
+        if arguments.contains("--qa-dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
+        let route = arguments[flag + 1].split(separator: ":", maxSplits: 1).map(String.init)
+        if arguments.contains("--qa-expanded") { expandToWindow() }
+        else { showPopover() }
+        switch route.first {
+        case "reader":
+            if route.count == 2, let id = Int64(route[1]) { appState.openMessage(id: id) }
+        case "draft":
+            if route.count == 2, let draft = appState.inbox.drafts.first(where: { $0.id == route[1] }) {
+                await appState.openDraft(draft)
+            }
+        case "settings":
+            await appState.openSettings(section: route.count == 2 ? route[1] : "general")
+        default: break
+        }
+    }
+    #endif
 
     func application(_ application: NSApplication, open urls: [URL]) {
         if !bootstrapFinished { deferredMailURLs.append(contentsOf: urls); return }
@@ -257,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mailWindowFrame = mailWindow?.frame
         mailWindow?.orderOut(nil)
         mailWindow?.contentViewController = nil
+        if appState.router.currentView == .settings { appState.back() }
         appState.router.isExpanded = false
         NSApp.setActivationPolicy(.accessory)
         installPopoverContent()
@@ -270,6 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mailWindowFrame = sender.frame
         sender.orderOut(nil)
         sender.contentViewController = nil
+        if appState.router.currentView == .settings { appState.back() }
         appState.router.isExpanded = false
         NSApp.setActivationPolicy(.accessory)
         return false
@@ -340,9 +371,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func checkMail() { Task { await appState.refreshInbox() } }
 
     @objc private func showSettings() {
-        if appState.router.isExpanded { expandToWindow() }
-        else if !popover.isShown { showPopover() }
+        expandToWindow()
         Task { await appState.navigate(to: .settings) }
+    }
+
+    @objc private func toggleCompactSidebar() {
+        let defaults = UserDefaults.standard
+        defaults.set(!defaults.bool(forKey: SettingsKey.compactSidebar), forKey: SettingsKey.compactSidebar)
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleCompactSidebar) {
+            menuItem.state = UserDefaults.standard.bool(forKey: SettingsKey.compactSidebar) ? .on : .off
+            return appState.router.isExpanded
+        }
+        return true
     }
 
     private func addAction(_ title: String, action: Selector, key: String = "", to menu: NSMenu) {
@@ -369,6 +412,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
         fileItem.submenu = file
         main.insertItem(fileItem, at: 1)
+        let viewMenu = NSMenu(title: "View")
+        addAction("Use Compact Sidebar", action: #selector(toggleCompactSidebar), key: "s", to: viewMenu)
+        viewMenu.items.last?.keyEquivalentModifierMask = [.command, .control]
+        let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+        viewItem.submenu = viewMenu
+        main.addItem(viewItem)
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")

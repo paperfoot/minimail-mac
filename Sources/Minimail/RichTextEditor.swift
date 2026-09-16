@@ -246,23 +246,121 @@ struct RichTextToolbar: View {
         }
     }
 
-    /// Prepend a simple list marker to each selected line. Keeps the HTML
-    /// export readable even without real `<ul>` output — recipients see "•"
-    /// or "1." bullets preserved inline.
+    /// Prepend a simple list marker to each selected, nonempty paragraph.
+    /// Keeps the HTML export readable even without real `<ul>` output —
+    /// recipients see "•" or "1." markers preserved inline.
     private func insertListMarker(_ marker: String) {
         guard let textView = textViewProvider(),
               let storage = textView.textStorage else { return }
         let selection = textView.selectedRange()
-        let ns = storage.string as NSString
-        let lineRange = ns.lineRange(for: selection)
-        let lineText = ns.substring(with: lineRange)
-        // Don't double-prefix if the line already starts with the marker.
-        if lineText.hasPrefix(marker) { return }
-        let replacement = marker + lineText
-        if textView.shouldChangeText(in: lineRange, replacementString: replacement) {
-            storage.replaceCharacters(in: lineRange, with: replacement)
+        guard let edit = Self.listMarkerEdit(
+            in: storage,
+            selectedRange: selection,
+            marker: marker
+        ) else { return }
+
+        let undoManager = textView.undoManager
+        undoManager?.beginUndoGrouping()
+        defer { undoManager?.endUndoGrouping() }
+
+        if textView.shouldChangeText(in: edit.range, replacementString: edit.replacement.string) {
+            storage.replaceCharacters(in: edit.range, with: edit.replacement)
             textView.didChangeText()
+            textView.setSelectedRange(edit.selection)
+            undoManager?.setActionName(marker.hasPrefix("•") ? "Bullet List" : "Numbered List")
         }
+    }
+
+    /// Pure list transformation kept separate from NSTextView mutation so the
+    /// edit is deterministic and can be covered without constructing AppKit UI.
+    /// The returned replacement retains every existing text attribute.
+    static func listMarkerEdit(
+        in attributedText: NSAttributedString,
+        selectedRange: NSRange,
+        marker: String
+    ) -> (range: NSRange, replacement: NSAttributedString, selection: NSRange)? {
+        guard attributedText.length > 0, !marker.isEmpty else { return nil }
+
+        let text = attributedText.string as NSString
+        let location = min(selectedRange.location, attributedText.length)
+        let selectionLength = min(selectedRange.length, attributedText.length - location)
+        let selectionEnd = location + selectionLength
+        let lastSelectedLocation = selectionLength > 0 ? selectionEnd - 1 : location
+
+        let firstParagraph = text.paragraphRange(for: NSRange(location: location, length: 0))
+        let lastParagraph = text.paragraphRange(
+            for: NSRange(location: lastSelectedLocation, length: 0)
+        )
+        let editRange = NSUnionRange(firstParagraph, lastParagraph)
+        guard editRange.length > 0 else { return nil }
+
+        var insertionLocations: [Int] = []
+        var paragraphLocation = editRange.location
+        let editEnd = NSMaxRange(editRange)
+        while paragraphLocation < editEnd {
+            let paragraphRange = text.paragraphRange(
+                for: NSRange(location: paragraphLocation, length: 0)
+            )
+            let paragraph = text.substring(with: paragraphRange)
+            let content = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !content.isEmpty, !paragraphAlreadyHasMarker(content, marker: marker) {
+                insertionLocations.append(paragraphRange.location)
+            }
+
+            let nextLocation = NSMaxRange(paragraphRange)
+            guard nextLocation > paragraphLocation else { break }
+            paragraphLocation = nextLocation
+        }
+        guard !insertionLocations.isEmpty else { return nil }
+
+        let replacement = NSMutableAttributedString(
+            attributedString: attributedText.attributedSubstring(from: editRange)
+        )
+        for insertionLocation in insertionLocations.reversed() {
+            let attributeLocation = min(insertionLocation, attributedText.length - 1)
+            var attributes = attributedText.attributes(at: attributeLocation, effectiveRange: nil)
+            // A list marker should match the surrounding text, but must not
+            // accidentally become part of a leading link or attachment.
+            attributes.removeValue(forKey: .link)
+            attributes.removeValue(forKey: .attachment)
+            replacement.insert(
+                NSAttributedString(string: marker, attributes: attributes),
+                at: insertionLocation - editRange.location
+            )
+        }
+
+        let markerLength = (marker as NSString).length
+        let adjustedSelection: NSRange
+        if selectionLength == 0 {
+            let insertionsBeforeCursor = insertionLocations.count { $0 <= location }
+            adjustedSelection = NSRange(
+                location: location + insertionsBeforeCursor * markerLength,
+                length: 0
+            )
+        } else {
+            let insertionsBeforeStart = insertionLocations.count { $0 <= location }
+            let insertionsBeforeEnd = insertionLocations.count { $0 < selectionEnd }
+            let adjustedStart = location + insertionsBeforeStart * markerLength
+            let adjustedEnd = selectionEnd + insertionsBeforeEnd * markerLength
+            adjustedSelection = NSRange(
+                location: adjustedStart,
+                length: adjustedEnd - adjustedStart
+            )
+        }
+
+        return (editRange, replacement, adjustedSelection)
+    }
+
+    private static func paragraphAlreadyHasMarker(_ content: String, marker: String) -> Bool {
+        if marker.hasPrefix("•") {
+            return content.hasPrefix("•")
+        }
+        if marker.first?.isNumber == true {
+            let token = content.prefix { !$0.isWhitespace }
+            guard token.last == "." || token.last == ")" else { return false }
+            return !token.dropLast().isEmpty && token.dropLast().allSatisfy(\.isNumber)
+        }
+        return content.hasPrefix(marker)
     }
 
     private func clearFormatting() {

@@ -49,32 +49,9 @@ struct RootView: View {
 
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            if !state.router.isExpanded {
-                HStack {
-                    Text("Minimail").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button {
-                        NotificationCenter.default.post(name: .minimailExpandWindow, object: nil)
-                    } label: {
-                        Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 11, weight: .medium))
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                    }
-                    .buttonStyle(.bordered)
-                    .help("Open full mail window (⌥⌘1)")
-                    .accessibilityLabel("Open full mail window")
-                    Menu {
-                        Button("Open Mail Window") { NotificationCenter.default.post(name: .minimailExpandWindow, object: nil) }
-                        Button("Settings…") { Task { await state.navigate(to: .settings) } }
-                        Divider()
-                        Button("Quit Minimail", role: .destructive) { NSApp.terminate(nil) }
-                    } label: { Image(systemName: "ellipsis.circle") }
-                    .menuStyle(.borderlessButton).fixedSize()
-                    .accessibilityLabel("Minimail menu")
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 14).padding(.vertical, 6)
+        .onChange(of: state.router.currentView) { _, route in
+            if route == .settings && !state.router.isExpanded {
+                NotificationCenter.default.post(name: .minimailExpandWindow, object: nil)
             }
         }
         .onExitCommand {

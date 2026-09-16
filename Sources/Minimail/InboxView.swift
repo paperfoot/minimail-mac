@@ -3,6 +3,7 @@ import SwiftUI
 struct InboxView: View {
     @Environment(AppState.self) private var state
     var expanded = false
+    @State private var showSearch = false
     @FocusState private var searchFocused: Bool
     @State private var pendingDeleteIDs: [Int64] = []
     @State private var pendingDeleteDraft: Draft?
@@ -17,11 +18,11 @@ struct InboxView: View {
             if !expanded {
                 header(session: session)
                 Divider().opacity(0.25)
-                folderRow(inbox: inbox)
+            }
+            if expanded || showSearch || !inbox.searchQuery.isEmpty {
+                searchRow(bound: $boundInbox.searchQuery)
                 Divider().opacity(0.15)
             }
-            searchRow(bound: $boundInbox.searchQuery)
-            Divider().opacity(0.15)
             if let err = inbox.error {
                 ErrorBanner(error: err)
             } else if let err = inbox.searchError {
@@ -54,116 +55,57 @@ struct InboxView: View {
             }
             Button("Cancel", role: .cancel) { pendingDeleteDraft = nil }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .minimailFocusSearch)) { _ in searchFocused = true }
-        .background(Button("") { searchFocused = true }.keyboardShortcut("f", modifiers: .command).hidden())
-        .onAppear {
-            // Land the keyboard selection on the first unread message when
-            // the inbox first appears — saves the user pressing j to get to
-            // what they actually want to read.
-            if state.inbox.focusedRowIndex < 0 {
-                let visible = state.inbox.visible()
-                if let idx = visible.firstIndex(where: { $0.isUnread }) {
-                    state.inbox.focusedRowIndex = idx
-                }
-            }
-        }
+        .onReceive(NotificationCenter.default.publisher(for: .minimailFocusSearch)) { _ in revealSearch() }
+        .background(Button("") { revealSearch() }.keyboardShortcut("f", modifiers: .command).hidden())
+    }
+
+    private func revealSearch() {
+        showSearch = true
+        DispatchQueue.main.async { searchFocused = true }
     }
 
     private func header(session: SessionState) -> some View {
-        HStack(spacing: 8) {
-            Button {
-                state.openAccountSwitcher()
-            } label: {
-                HStack(spacing: 8) {
-                    if session.currentAccount == nil && !session.accounts.isEmpty {
-                        // Unified inbox indicator — same gradient + symbol as
-                        // the AccountSwitcher row so the user immediately
-                        // recognises the mode.
-                        ZStack {
-                            Circle()
-                                .fill(LinearGradient(
-                                    colors: [.indigo, .purple],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ))
-                                .frame(width: 20, height: 20)
-                            Image(systemName: "tray.2.fill")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.white)
+        HStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
+                Menu {
+                    ForEach(InboxState.Folder.allCases, id: \.self) { folder in
+                        Button { Task { await state.selectFolder(folder) } } label: {
+                            Label(folder.rawValue, systemImage: folder == state.inbox.currentFolder ? "checkmark" : folder.symbol)
                         }
-                        Text("All accounts")
-                            .font(.system(size: 13, weight: .medium))
-                    } else {
-                        AccountAvatar(email: session.currentAccount?.email ?? "?")
-                        Text(session.currentAccount?.email ?? "No account")
-                            .font(.system(size: 13, weight: .medium))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
                     }
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(state.inbox.currentFolder.rawValue).font(.system(size: 16, weight: .semibold))
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                    }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .glassEffect(.regular, in: .capsule)
-                .contentShape(Capsule())
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("Mailboxes: \(state.inbox.currentFolder.rawValue)")
+                MailAccountMenu()
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-            .help("Switch account (⌘0 = all, ⌘1…⌘9 = individual)")
-
-            Spacer()
-
-            Button { Task { await state.saveComposeAndStartNew() } } label: {
-                Image(systemName: "square.and.pencil")
-            }
-            .buttonStyle(IconButtonStyle())
-            .help("New message (⌘N)")
-            .accessibilityLabel("New message")
-            .keyboardShortcut("n", modifiers: .command)
-
-            Button {
-                Task { await state.refreshInbox() }
-            } label: {
-                if state.inbox.syncState == .syncing {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.clockwise")
-                }
-            }
-            .buttonStyle(IconButtonStyle())
-            .help("Check for new mail (⇧⌘N)")
-            .accessibilityLabel(state.inbox.syncState == .syncing ? "Syncing" : "Refresh inbox")
-            .keyboardShortcut("n", modifiers: [.command, .shift])
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-    }
-
-    private func folderRow(inbox: InboxState) -> some View {
-        HStack {
+            Spacer(minLength: 8)
+            Button { revealSearch() } label: { Image(systemName: "magnifyingglass") }
+                .buttonStyle(IconButtonStyle()).help("Search mail (⌘F)").accessibilityLabel("Search mail")
+            Button { Task { await state.saveComposeAndStartNew() } } label: { Image(systemName: "square.and.pencil") }
+                .buttonStyle(IconButtonStyle()).help("New message (⌘N)").accessibilityLabel("New message")
+            CompactExpandButton()
             Menu {
-                ForEach(InboxState.Folder.allCases, id: \.self) { folder in
-                    Button {
-                        Task { await state.selectFolder(folder) }
-                    } label: {
-                        Label(folder.rawValue + (badge(for: folder, inbox: inbox).map { " (\($0))" } ?? ""), systemImage: folder.symbol)
-                    }
-                }
-            } label: {
-                Label(inbox.currentFolder.rawValue, systemImage: inbox.currentFolder.symbol)
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .accessibilityLabel("Mailboxes: \(inbox.currentFolder.rawValue)")
-            Spacer()
-            if let count = badge(for: inbox.currentFolder, inbox: inbox) {
-                Text("\(count)").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
+                Button("Check for New Mail") { Task { await state.refreshInbox() } }
+                    .disabled(state.inbox.syncState == .syncing)
+                Button("Mark All as Read") { Task { await state.markAllRead() } }
+                    .disabled(state.inbox.totalUnread == 0)
+                Divider()
+                Button("Outbox…") { Task { await state.openOutbox() } }
+                Button("Settings…") { Task { await state.navigate(to: .settings) } }
+                Button("Keyboard Shortcuts") { state.showKeyboardHelp = true }
+                Divider()
+                Button("Quit Minimail") { NSApp.terminate(nil) }
+            } label: { Image(systemName: "ellipsis").frame(width: 24, height: 28) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("Minimail menu")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 14).padding(.vertical, 12)
     }
 
     private func badge(for folder: InboxState.Folder, inbox: InboxState) -> Int? {
@@ -197,8 +139,13 @@ struct InboxView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12))
-            TextField("Search all mail", text: bound)
+            TextField(state.inbox.currentFolder == .drafts ? "Search drafts" : "Search all mail", text: bound)
                 .focused($searchFocused)
+                .onExitCommand {
+                    bound.wrappedValue = ""
+                    showSearch = false
+                    searchFocused = false
+                }
                 .accessibilityLabel("Search all mail")
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
@@ -543,72 +490,24 @@ struct InboxView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
-            if state.inbox.totalUnread > 0 {
-                Text("\(state.inbox.totalUnread) unread")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            if state.inbox.syncState == .syncing {
+                ProgressView().controlSize(.mini)
+                Text("Checking mail…")
             } else {
-                Text("All caught up")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                let count = state.inbox.currentFolder == .drafts ? state.inbox.visibleDrafts().count : state.inbox.visible().count
+                Text("\(count) \(state.inbox.searchQuery.isEmpty ? "message" : "result")\(count == 1 ? "" : "s")\(state.inbox.canLoadMore && state.inbox.searchQuery.isEmpty ? "+" : "")")
             }
             Spacer()
-            Button { Task { await state.markAllRead() } } label: {
-                Image(systemName: "checkmark.circle")
-                    .font(.system(size: 13))
-            }
-            .buttonStyle(IconButtonStyle())
-            .help("Mark all messages as read")
-            .accessibilityLabel("Mark all messages as read")
-            .disabled(state.inbox.totalUnread == 0)
-
-            if !expanded {
-            Button { Task { await state.navigate(to: .settings) } } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 13))
-            }
-            .buttonStyle(IconButtonStyle())
-            .help("Settings")
-            .accessibilityLabel("Settings")
-            .keyboardShortcut(",", modifiers: .command)
-            }
+            if state.inbox.totalUnread > 0 { Text("\(state.inbox.totalUnread) unread") }
+            Button { Task { await state.refreshInbox() } } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.borderless).disabled(state.inbox.syncState == .syncing)
+                .help("Check for new mail (⇧⌘N)").accessibilityLabel("Check for new mail")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.04))
+        .font(.system(size: 11)).foregroundStyle(.secondary)
+        .padding(.horizontal, 14).padding(.vertical, 9)
     }
-}
 
-struct FolderTab: View {
-    let title: String
-    let count: Int?
-    let selected: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 5) {
-                Text(title)
-                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                if let count {
-                    Text(String(count))
-                        .font(.system(size: 10, weight: .semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(selected ? Color.accentColor : Color.primary.opacity(0.12),
-                                    in: Capsule())
-                        .foregroundStyle(selected ? Color.white : .secondary)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(selected ? Color.accentColor.opacity(0.18) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 7))
-            .foregroundStyle(selected ? Color.accentColor : .secondary)
-        }
-        .buttonStyle(.plain)
-    }
 }
 
 struct MessageRow: View {
@@ -619,9 +518,8 @@ struct MessageRow: View {
     var isChecked: Bool = false
     @State private var hovered = false
 
-    /// Unified inbox: each row shows a small mini-avatar of the destination
-    /// account so the user can tell at a glance which mailbox the message
-    /// belongs to. Hidden when focused on a single account (redundant).
+    /// The unified inbox includes the destination account in its preview.
+    /// It is redundant when a single account is selected.
     private var showAccountIndicator: Bool {
         state.session.currentAccount == nil
     }
@@ -634,11 +532,6 @@ struct MessageRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    if showAccountIndicator {
-                        AccountAvatar(email: message.account_email)
-                            .frame(width: 14, height: 14)
-                            .help("To: \(message.account_email)")
-                    }
                     if message.isStarred {
                         Image(systemName: "star.fill")
                             .font(.system(size: 10))
@@ -650,30 +543,25 @@ struct MessageRow: View {
                     if message.has_attachments == true {
                         Image(systemName: "paperclip")
                             .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 4)
                     Text(DateFormat.inboxList(message.created_at))
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
                 Text(message.displaySubject)
                     .font(.system(size: 12, weight: message.isUnread ? .medium : .regular))
                     .foregroundStyle(message.isUnread ? .primary : .secondary)
                     .lineLimit(1)
                 if let snippet = message.snippet, !snippet.isEmpty {
-                    Text(snippet)
+                    Text(showAccountIndicator ? message.account_email + " · " + snippet : snippet)
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
 
-            // Always reserved so showing / hiding doesn't reflow the row.
-            // Gmail / Apple Mail use the same trick.
-            hoverActions
-                .opacity(hovered ? 1 : 0)
-                .allowsHitTesting(hovered)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -695,7 +583,7 @@ struct MessageRow: View {
         } else if hovered || !state.inbox.selection.isEmpty {
             Button { state.inbox.toggle(message.id) } label: {
                 Image(systemName: "circle")
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .font(.system(size: 14))
             }
             .buttonStyle(.plain)
@@ -707,34 +595,6 @@ struct MessageRow: View {
         } else {
             Color.clear.frame(width: 14, height: 14)
         }
-    }
-
-    private var hoverActions: some View {
-        HStack(spacing: 4) {
-            Button {
-                Task { await state.toggleStar(message) }
-            } label: {
-                Image(systemName: message.isStarred ? "star.fill" : "star")
-                    .foregroundStyle(message.isStarred ? AnyShapeStyle(Color.yellow) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
-            }
-            .buttonStyle(.plain)
-            .help(message.isStarred ? "Unstar" : "Star")
-            .accessibilityLabel(message.isStarred ? "Unstar message" : "Star message")
-
-            Button {
-                Task {
-                    if message.isArchived { await state.unarchive(message: message) }
-                    else { await state.archive(ids: [message.id]) }
-                }
-            } label: {
-                Image(systemName: message.isArchived ? "tray.and.arrow.down" : "archivebox")
-                    .foregroundStyle(HierarchicalShapeStyle.tertiary)
-            }
-            .buttonStyle(.plain)
-            .help(message.isArchived ? "Move to Inbox" : "Archive")
-            .accessibilityLabel(message.isArchived ? "Move to Inbox" : "Archive message")
-        }
-        .font(.system(size: 12))
     }
 
     @ViewBuilder

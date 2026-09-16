@@ -16,6 +16,8 @@ import plistlib
 import shutil
 import sqlite3
 import stat
+import struct
+import zlib
 import subprocess
 import sys
 import textwrap
@@ -96,7 +98,9 @@ def make_long_html() -> tuple[str, str]:
 
     html = """<!doctype html>
 <html><body>
-<h1>Quarterly project review</h1>
+<div style="background:#183c54;color:white;padding:12px">Quarterly project review</div>
+<img src="cid:qa-logo" width="160" height="48" alt="Embedded blue banner">
+<table width="720"><tr><td>Wide table: start</td><td align="right">Wide table: end</td></tr></table>
 <p>Hello Alex,</p>
 <p>This deliberately long message exercises reader width, scrolling, links,
 typography, quoted replies, and protected remote content.</p>
@@ -132,6 +136,14 @@ def seed_database() -> None:
         "Minimail QA attachment\n\n- Check navigation\n- Check reader\n- Check compose\n",
         encoding="utf-8",
     )
+
+    # A deterministic PNG fixture, with no remote dependency.
+    def png_chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+    pixels = b"".join(b"\x00" + bytes([30, 115, 195]) * 160 for _ in range(48))
+    image_path = attachment_dir / "embedded-banner.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 160, 48, 8, 2, 0, 0, 0))
+                          + png_chunk(b"IDAT", zlib.compress(pixels)) + png_chunk(b"IEND", b""))
 
     long_text, long_html = make_long_html()
     base_time = datetime(2026, 9, 16, 8, 30, tzinfo=timezone.utc)
@@ -274,6 +286,16 @@ def seed_database() -> None:
                 ),
             )
 
+            for attachment_file, remote_id, mime, cid in [
+                (image_path, "qa-inline-banner", "image/png", "qa-logo"),
+                (attachment_path, "qa-thread-checklist", "text/plain", None),
+            ]:
+                connection.execute(
+                    "INSERT INTO attachments (message_id, remote_attachment_id, filename, content_type, size, local_path, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (message_ids[0], remote_id, attachment_file.name, mime, attachment_file.stat().st_size,
+                     str(attachment_file), json.dumps({"content_id": cid, "content_disposition": "inline" if cid else "attachment"})),
+                )
+
             connection.executemany(
                 """
                 INSERT INTO drafts (
@@ -397,6 +419,23 @@ def wrapper_source() -> str:
             success({})
         if command == "attachments" and subcommand == "prefetch":
             success({})
+        if command == "attachments" and subcommand == "list":
+            with sqlite3.connect(database) as connection:
+                connection.row_factory = sqlite3.Row
+                records = connection.execute(
+                    "SELECT id, remote_attachment_id, filename, content_type, size, local_path, raw_json FROM attachments WHERE message_id = ? ORDER BY id",
+                    (int(words[2]),),
+                ).fetchall()
+            rows = []
+            for record in records:
+                metadata = json.loads(record["raw_json"])
+                rows.append({
+                    "id": record["remote_attachment_id"] or str(record["id"]),
+                    "filename": record["filename"], "content_type": record["content_type"], "size": record["size"],
+                    "downloaded": bool(record["local_path"] and Path(record["local_path"]).is_file()),
+                    "content_id": metadata.get("content_id"), "content_disposition": metadata.get("content_disposition"),
+                })
+            success(rows)
         if command == "attachments" and subcommand in {"get", "show"}:
             numeric = [value for value in words[2:] if value.isdigit()]
             if numeric:

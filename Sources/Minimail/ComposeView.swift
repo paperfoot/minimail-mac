@@ -25,6 +25,9 @@ struct ComposeView: View {
     /// Local mirror of `compose.scheduledAt` while the date picker is up
     /// — committed to `state.compose.scheduledAt` on "Schedule".
     @State private var draftScheduledAt: Date = Date().addingTimeInterval(60 * 60)
+    /// Compact compose starts with formatting chrome tucked away. The full
+    /// mail window has room to keep it visible throughout the draft.
+    @State private var showFormatting: Bool = false
 
     enum Field { case to, cc, bcc, replyTo, subject }
 
@@ -81,8 +84,10 @@ struct ComposeView: View {
                 }.padding(10)
             }
 
-            RichTextToolbar(textViewProvider: { editorHandle.textView })
-            Divider().opacity(0.1)
+            if state.router.isExpanded || showFormatting {
+                RichTextToolbar(textViewProvider: { editorHandle.textView })
+                Divider().opacity(0.1)
+            }
 
             RichTextEditor(
                 attributedText: $bound.bodyAttributed,
@@ -102,16 +107,13 @@ struct ComposeView: View {
             Button("Keep Editing", role: .cancel) { }
         }
         .onAppear {
-            if state.compose.to.isEmpty {
-                focus = .to
-            } else {
-                // Hand focus to the NSTextView after the window exists.
-                DispatchQueue.main.async {
-                    if let tv = editorHandle.textView {
-                        tv.window?.makeFirstResponder(tv)
-                    }
-                }
-            }
+            focusDraft()
+        }
+        .onChange(of: state.compose.generation) { _, _ in
+            showCcBcc = false
+            showReplyTo = false
+            showFormatting = false
+            focusDraft()
         }
         // Drag files (from Finder etc.) onto any part of compose → attach.
         .onDrop(of: [.fileURL], isTargeted: $dropHighlight) { providers in
@@ -149,31 +151,24 @@ struct ComposeView: View {
     /// Two soft guards before send: subject-empty warning and an
     /// "attached-but-no-attachment" heuristic. Returns nil when clear.
     private func validateBeforeSend() -> SendWarning? {
+        var warnings: [String] = []
         let subject = state.compose.subject.trimmingCharacters(in: .whitespacesAndNewlines)
         if subject.isEmpty {
-            return SendWarning(
-                title: "Send without a subject?",
-                message: "Recipients often filter out messages without a subject. You can go back and add one."
-            )
+            warnings.append("The subject is empty.")
         }
         let body = state.compose.body.trimmingCharacters(in: .whitespacesAndNewlines)
         if body.isEmpty {
-            return SendWarning(
-                title: "Send without a message?",
-                message: "The message body is empty. Send anyway?"
-            )
+            warnings.append("The message body is empty.")
         }
         if state.compose.attachments.isEmpty {
             let body = attachmentHeuristicText(from: state.compose.body).lowercased()
             let tokens = ["attached", "attaching", "attachment", "enclosed", "see attached"]
             if tokens.contains(where: body.contains) {
-                return SendWarning(
-                    title: "You mentioned an attachment",
-                    message: "Your message references an attachment but nothing is attached. Send anyway?"
-                )
+                warnings.append("Your message mentions an attachment, but no files are attached.")
             }
         }
-        return nil
+        guard !warnings.isEmpty else { return nil }
+        return SendWarning(title: "Review before sending", message: warnings.joined(separator: "\n\n"))
     }
 
     /// Attachment checks should look at what the user wrote, not quoted reply
@@ -199,6 +194,20 @@ struct ComposeView: View {
             return
         }
         Task { _ = await state.send() }
+    }
+
+    private func focusDraft() {
+        if state.compose.to.isEmpty {
+            focus = .to
+        } else {
+            // Hand focus to the NSTextView after the current draft's editor
+            // has been mounted.
+            DispatchQueue.main.async {
+                if let tv = editorHandle.textView {
+                    tv.window?.makeFirstResponder(tv)
+                }
+            }
+        }
     }
 
     private func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
@@ -234,7 +243,7 @@ struct ComposeView: View {
     }
 
     /// Looks at the current system pasteboard. If an image is present, writes
-    /// it to a temp file (Minimail-paste-{timestamp}.png) and adds it to the
+    /// it to a uniquely named temp file and adds it to the
     /// attachment list so Resend sends it as a proper attachment.
     private func pasteImageFromClipboard() {
         let pb = NSPasteboard.general
@@ -244,7 +253,7 @@ struct ComposeView: View {
               let rep = NSBitmapImageRep(data: tiff),
               let png = rep.representation(using: .png, properties: [:]) else { return }
 
-        let filename = "Minimail-paste-\(Int(Date().timeIntervalSince1970)).png"
+        let filename = "Minimail-paste-\(UUID().uuidString).png"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         do {
             try png.write(to: url)
@@ -277,6 +286,21 @@ struct ComposeView: View {
 
             Spacer()
 
+            if !state.router.isExpanded {
+                CompactExpandButton()
+
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        showFormatting.toggle()
+                    }
+                } label: {
+                    Image(systemName: "textformat")
+                }
+                .buttonStyle(IconButtonStyle())
+                .help(showFormatting ? "Hide formatting" : "Show formatting")
+                .accessibilityLabel(showFormatting ? "Hide formatting" : "Show formatting")
+            }
+
             Button { pickAttachments() } label: {
                 Image(systemName: "paperclip")
             }
@@ -288,8 +312,7 @@ struct ComposeView: View {
             Menu {
                 Button("Save & Close") {
                     Task {
-                        await state.flushAutosave()
-                        state.router.currentView = .inbox
+                        await state.navigate(to: .inbox)
                     }
                 }
                 Divider()
@@ -540,7 +563,7 @@ struct ComposeView: View {
                     Text(preview)
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
-                        .lineLimit(3)
+                        .lineLimit(state.router.isExpanded ? 3 : 1)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                 }
@@ -564,7 +587,7 @@ struct ComposeView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .help(err)
             } else {
-                Text(subtitle)
+                Text(state.router.isExpanded ? subtitle : compactCounts)
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -598,10 +621,18 @@ struct ComposeView: View {
 
             sendButton
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(state.compose.isSending || state.deliveringSend != nil)
+                .disabled(
+                    state.compose.isSending
+                        || state.compose.isLoadingAttachments
+                        || state.deliveringSend != nil
+                )
 
             scheduleMenu
-                .disabled(state.compose.isSending || state.deliveringSend != nil)
+                .disabled(
+                    state.compose.isSending
+                        || state.compose.isLoadingAttachments
+                        || state.deliveringSend != nil
+                )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -628,7 +659,7 @@ struct ComposeView: View {
     private var scheduleMenu: some View {
         Menu {
             if state.compose.scheduledAt != nil {
-                Button("Send Now (cancel schedule)") {
+                Button("Remove Schedule") {
                     state.compose.scheduledAt = nil
                 }
                 Divider()
@@ -730,6 +761,18 @@ struct ComposeView: View {
         return parts.joined(separator: " · ")
     }
 
+    private var compactCounts: String {
+        let recipientCount = state.compose.to.splitAddressTokens().count
+            + state.compose.cc.splitAddressTokens().count
+            + state.compose.bcc.splitAddressTokens().count
+        var parts = ["\(recipientCount) recipient\(recipientCount == 1 ? "" : "s")"]
+        if !state.compose.attachments.isEmpty {
+            let count = state.compose.attachments.count
+            parts.append("\(count) file\(count == 1 ? "" : "s")")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     @ViewBuilder
     private var sendButton: some View {
         let sending = state.compose.isSending
@@ -739,7 +782,7 @@ struct ComposeView: View {
         } label: {
             HStack(spacing: 6) {
                 if sending {
-                    ProgressView().controlSize(.small).tint(.white)
+                    ProgressView().controlSize(.small)
                 }
                 Text(sending
                     ? "Sending…"
@@ -749,20 +792,8 @@ struct ComposeView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .opacity(sending ? 0 : 1)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 5)
-            .foregroundStyle(.white)
-            .background(
-                LinearGradient(
-                    colors: [Color.accentColor, Color.accentColor.opacity(0.85)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                in: Capsule()
-            )
-            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.borderedProminent)
         .help(
             state.compose.to.splitAddressTokens().isEmpty
                 ? "Add a recipient before sending"
