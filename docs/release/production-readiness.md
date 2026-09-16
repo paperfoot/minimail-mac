@@ -1,6 +1,6 @@
 # Production Readiness
 
-Last updated: 2026-04-26
+Last updated: 2026-09-16
 
 ## Current Verdict
 
@@ -20,14 +20,14 @@ below are closed.
   and publishes a GitHub release.
 - The build script now builds the sibling `email-cli` release binary before
   embedding it and validates the expected CLI contract.
+- The Developer ID identity for SUPER SIMPLE LEARNING LTD is configured;
+  the 0.8.0 app and helper signatures were verified after local installation.
 
 ## Not Ready For Paid Public Release
 
-- A real Paperfoot Developer ID certificate and `APPLE_TEAM_ID` must be
-  configured. The release script now refuses to default to the old company
-  identity.
-- Apple notarization credentials must be stored in the configured
-  `NOTARY_PROFILE`.
+- Restore the configured Apple notarization profile before publishing 0.8.0.
+  The local signed build is installed, but public notarization/publication
+  remain pending; see [the release record](0.8.0.md).
 - Payment and license activation are still product/server work. The legal docs
   mention license activation, but the app does not enforce a paid license yet.
 - Legal docs are drafts and still say counsel review is required.
