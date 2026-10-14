@@ -72,14 +72,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         )
 
         // NSPopover doesn't follow its anchor when the status bar window
-        // moves (display sleep/wake, resolution or Space changes, menu bar
-        // reflow). With `.applicationDefined` behaviour it stays open through
-        // all of them and can end up stranded over the menu bar, covering the
-        // icon that closes it. Snap it back whenever the anchor may have moved.
-        for name in [NSApplication.didChangeScreenParametersNotification, NSWindow.didMoveNotification] {
+        // moves (a display plugged in or removed, lid closed, sleep/wake,
+        // resolution or Space changes, menu bar reflow). With
+        // `.applicationDefined` behaviour it stays open through all of them
+        // and can end up stranded over the menu bar, covering the icon that
+        // closes it. Snap it back whenever the anchor may have moved.
+        for name in [NSApplication.didChangeScreenParametersNotification,
+                     NSWindow.didMoveNotification, NSWindow.didChangeScreenNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(statusAnchorMayHaveMoved(_:)), name: name, object: nil)
         }
-        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
             NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(statusAnchorMayHaveMoved(_:)), name: name, object: nil)
         }
 
@@ -241,9 +244,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc private func statusAnchorMayHaveMoved(_ notification: Notification) {
-        if notification.name == NSWindow.didMoveNotification,
-           notification.object as? NSWindow !== statusItem.button?.window { return }
+        if let window = notification.object as? NSWindow {
+            if window === statusItem.button?.window { reanchorPopover() }
+            return
+        }
         reanchorPopover()
+        // After a display or wake change the menu bar and windows keep
+        // moving for a moment; anchor again once they've settled.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            self?.reanchorPopover()
+        }
     }
 
     private func installPopoverContent() {
