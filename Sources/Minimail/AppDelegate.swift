@@ -71,6 +71,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             object: popover
         )
 
+        // NSPopover doesn't follow its anchor when the status bar window
+        // moves (display sleep/wake, resolution or Space changes, menu bar
+        // reflow). With `.applicationDefined` behaviour it stays open through
+        // all of them and can end up stranded over the menu bar, covering the
+        // icon that closes it. Snap it back whenever the anchor may have moved.
+        for name in [NSApplication.didChangeScreenParametersNotification, NSWindow.didMoveNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(statusAnchorMayHaveMoved(_:)), name: name, object: nil)
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(statusAnchorMayHaveMoved(_:)), name: name, object: nil)
+        }
+
         Task { @MainActor in
             await appState.bootstrap()
             bootstrapFinished = true
@@ -206,10 +218,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         } else if appState.router.isExpanded {
             expandToWindow()
         } else if popover.isShown {
-            popover.performClose(sender)
+            // A click on the icon brings a stranded popover back under it;
+            // only an already-anchored popover closes.
+            if !reanchorPopover() { popover.performClose(sender) }
         } else {
             showPopover()
         }
+    }
+
+    /// Snaps a shown popover back under the status item. Returns whether it
+    /// had drifted away from it.
+    @discardableResult
+    private func reanchorPopover() -> Bool {
+        guard popover.isShown, let button = statusItem.button,
+              let window = popover.contentViewController?.view.window else { return false }
+        let before = window.frame.origin
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        let after = window.frame.origin
+        // The unread count resizing the icon nudges the anchor a few points;
+        // only a real displacement counts as stranded.
+        return abs(after.x - before.x) > 8 || abs(after.y - before.y) > 8
+    }
+
+    @objc private func statusAnchorMayHaveMoved(_ notification: Notification) {
+        if notification.name == NSWindow.didMoveNotification,
+           notification.object as? NSWindow !== statusItem.button?.window { return }
+        reanchorPopover()
     }
 
     private func installPopoverContent() {
