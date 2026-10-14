@@ -1,10 +1,10 @@
 # Production Readiness
 
-Last updated: 2026-09-16
+Last updated: 2026-10-14
 
 ## Current Verdict
 
-Minimail is technically close to packageable as a notarized macOS app, but it
+Minimail ships as a notarized macOS app (0.8.2 is public), but it
 is not ready to sell as a commercial product until the paid-release items
 below are closed.
 
@@ -20,14 +20,12 @@ below are closed.
   and publishes a GitHub release.
 - The build script now builds the sibling `email-cli` release binary before
   embedding it and validates the expected CLI contract.
-- The Developer ID identity for SUPER SIMPLE LEARNING LTD is configured;
-  the 0.8.0 app and helper signatures were verified after local installation.
+- The Developer ID identity for SUPER SIMPLE LEARNING LTD and the
+  `minimail-notary` profile are configured; 0.8.2 was notarized, stapled and
+  published (see [the release record](0.8.2.md)).
 
 ## Not Ready For Paid Public Release
 
-- Restore the configured Apple notarization profile before publishing 0.8.0.
-  The local signed build is installed, but public notarization/publication
-  remain pending; see [the release record](0.8.0.md).
 - Payment and license activation are still product/server work. The legal docs
   mention license activation, but the app does not enforce a paid license yet.
 - Legal docs are drafts and still say counsel review is required.
